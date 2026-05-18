@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "detector-anomalias",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["/Users/romanhoyos94/Documents/Desarrollos-claude/Detector-anomailias-claude/start.py"],
+      "port": 8501,
+      "autoPort": true
+    }
+  ]
+}
