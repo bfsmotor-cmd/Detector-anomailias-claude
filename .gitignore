@@ -27,5 +27,9 @@ downloads/
 # Logs
 *.log
 
+# Estado local de auditoría (comentarios personales)
+.audit_state.json
+.audit_state.json.tmp
+
 # OS
 Thumbs.db

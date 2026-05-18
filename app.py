@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import timedelta
 import analyzer
+import comments_store
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,14 @@ with st.sidebar:
     )
 
     st.divider()
+    st.subheader("Filtros")
+    show_paused = st.checkbox(
+        "Mostrar campañas pausadas",
+        value=False,
+        help="Por defecto se ocultan las campañas con estado 'Pausada'. Actívalo para incluirlas en métricas y tablas.",
+    )
+
+    st.divider()
     st.subheader("Parámetros")
     threshold_pct = st.slider(
         "Umbral de consumo de presupuesto (%)",
@@ -56,6 +65,13 @@ with st.sidebar:
     budget_days = st.slider("Ventana presupuesto (días)", 3, 14, 7)
     conv_days = st.slider("Ventana conversiones sin actividad (días)", 2, 7, 3)
     ranking_days = st.slider("Ventana ranking (días)", 7, 90, 30)
+
+    st.divider()
+    st.subheader("Reglas auditoría")
+    conv_rate_threshold_pct = st.slider(
+        "Tasa de conversión 7d mínima (%)", 1, 50, 10,
+        help="Campañas con tasa < a este valor se marcan como anomalía.",
+    )
 
     st.divider()
     st.caption("v1.0 · Desarrollado con Streamlit")
@@ -110,21 +126,34 @@ def load_data(file_bytes: bytes, filename: str) -> pd.DataFrame:
         dtype=str,
     )
 
-    # Filtrar filas de totales que mete Google Ads (Campaña empieza con "Total:")
+    # Filtrar filas de totales que mete Google Ads.
+    # Aparecen con "Estado de la campaña" = "Total: X" y la columna "Campaña" vacía.
     if "Campaña" in df_raw.columns:
+        df_raw = df_raw[df_raw["Campaña"].astype(str).str.strip().replace("nan", "") != ""]
         df_raw = df_raw[~df_raw["Campaña"].astype(str).str.startswith("Total:", na=False)]
-    # Filtrar filas vacías o de resumen al final
+    if "Estado de la campaña" in df_raw.columns:
+        df_raw = df_raw[~df_raw["Estado de la campaña"].astype(str).str.startswith("Total:", na=False)]
     df_raw = df_raw.dropna(how="all")
 
     return analyzer.load_and_clean(df_raw)
 
 
 try:
-    df = load_data(uploaded_file.read(), uploaded_file.name)
+    df_full = load_data(uploaded_file.read(), uploaded_file.name)
 except Exception as e:
     st.error(f"Error al procesar el archivo: {e}")
     st.info("Asegúrate de exportar el CSV con separador `;` o `,` y codificación UTF-8.")
     st.stop()
+
+# Filtrar campañas pausadas según toggle del sidebar
+PAUSED_STATUSES = {"En pausa", "Pausada", "Paused"}
+if show_paused:
+    df = df_full
+    paused_rows = 0
+else:
+    mask_paused = df_full["_estado"].isin(PAUSED_STATUSES)
+    paused_rows = int(mask_paused.sum())
+    df = df_full[~mask_paused].copy()
 
 summary = analyzer.general_summary(df)
 latest_date = summary["latest_date"]
@@ -134,7 +163,11 @@ yesterday = latest_date - timedelta(days=1) if latest_date else None
 
 st.title("Dashboard de Anomalías – Google Ads")
 date_min, date_max = summary["date_range"]
-st.caption(f"Datos del {date_min.strftime('%d/%m/%Y')} al {date_max.strftime('%d/%m/%Y')}  ·  Última fecha: **{latest_date.strftime('%d/%m/%Y')}**")
+caption = f"Datos del {date_min.strftime('%d/%m/%Y')} al {date_max.strftime('%d/%m/%Y')}  ·  Última fecha: **{latest_date.strftime('%d/%m/%Y')}**"
+if paused_rows > 0:
+    paused_campaigns = df_full[df_full["_estado"].isin(PAUSED_STATUSES)]["Campaña"].nunique()
+    caption += f"  ·  🔕 {paused_campaigns} campaña(s) pausadas ocultas ({paused_rows} filas)"
+st.caption(caption)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Cuentas", summary["total_accounts"])
@@ -146,13 +179,149 @@ st.divider()
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🚨 Auditoría diaria",
     "🔴 Sin movimiento hoy",
     "🟠 Sin movimiento ayer",
     "🟡 Sin conversiones",
     "🔵 Presupuesto no consumido",
     "📊 Ranking de campañas",
 ])
+
+# ── Tab 0: Auditoría diaria consolidada ──────────────────────────────────────
+with tab0:
+    st.subheader("Auditoría diaria — campañas con anomalías")
+    st.caption(
+        "Una fila por campaña que dispare al menos una regla. Score = suma ponderada de las "
+        "reglas activas (50/40/35/20/11). Ordenado por mayor score."
+    )
+
+    audit = analyzer.compute_anomaly_table(
+        df,
+        conv_rate_threshold=conv_rate_threshold_pct / 100,
+        budget_threshold=threshold_pct / 100,
+        conv_days=conv_days,
+        budget_days=budget_days,
+    )
+
+    if audit.empty:
+        st.success("✅ Ninguna campaña activa dispara reglas de anomalía.")
+    else:
+        # KPIs rápidos
+        kc1, kc2, kc3, kc4 = st.columns(4)
+        kc1.metric("Campañas con anomalía", len(audit))
+        kc2.metric("Score máximo", int(audit["Score"].max()))
+        kc3.metric("Score promedio", round(audit["Score"].mean(), 1))
+        kc4.metric("Cuentas afectadas", audit["Cuenta"].nunique())
+
+        # Filtros
+        f1, f2 = st.columns([1, 2])
+        with f1:
+            min_score = st.number_input("Score mínimo", 0, int(audit["Score"].max()), 0, 5)
+        with f2:
+            accounts_filter = st.multiselect(
+                "Filtrar por cuenta", sorted(audit["Cuenta"].unique()),
+                placeholder="Todas las cuentas",
+            )
+
+        filtered_audit = audit[audit["Score"] >= min_score].copy()
+        if accounts_filter:
+            filtered_audit = filtered_audit[filtered_audit["Cuenta"].isin(accounts_filter)]
+
+        # Hidratar Revisada + Comentarios desde almacenamiento local
+        stored = comments_store.load_all()
+
+        def _stored_revisada(row):
+            entry = stored.get(f"{row['Cuenta']}||{row['Campaña']}", {})
+            return bool(entry.get("revisada", False))
+
+        def _stored_comentario(row):
+            entry = stored.get(f"{row['Cuenta']}||{row['Campaña']}", {})
+            return entry.get("comentario", "")
+
+        filtered_audit["Revisada"] = filtered_audit.apply(_stored_revisada, axis=1)
+        filtered_audit["Comentarios"] = filtered_audit.apply(_stored_comentario, axis=1)
+
+        # Reordenar: Score primero, 'Reglas activas' al final
+        col_order = [
+            "Score", "Cuenta", "Campaña",
+            "Clicks hoy", "Clicks ayer", "Tasa conv. 7d", "Consumo presupuesto 7d",
+            "Estado", "Motivo del estado", "Revisada", "Comentarios",
+            "Reglas activas",
+        ]
+        filtered_audit = filtered_audit[[c for c in col_order if c in filtered_audit.columns]]
+
+        edited = st.data_editor(
+            filtered_audit,
+            column_config={
+                "Score": st.column_config.ProgressColumn(
+                    "Score", min_value=0, max_value=156, format="%d",
+                    width="small", pinned=True,
+                ),
+                "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
+                "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
+                "Reglas activas": st.column_config.TextColumn(width="large", disabled=True),
+                "Clicks hoy": st.column_config.NumberColumn(disabled=True, width="small"),
+                "Clicks ayer": st.column_config.NumberColumn(disabled=True, width="small"),
+                "Tasa conv. 7d": st.column_config.NumberColumn(
+                    "Tasa conv. 7d", format="%.1f%%", disabled=True,
+                ),
+                "Consumo presupuesto 7d": st.column_config.NumberColumn(
+                    "Consumo ppto. 7d", format="%.1f%%", disabled=True,
+                ),
+                "Estado": st.column_config.TextColumn(disabled=True),
+                "Motivo del estado": st.column_config.TextColumn(disabled=True, width="medium"),
+                "Revisada": st.column_config.CheckboxColumn("Revisada", default=False),
+                "Comentarios": st.column_config.TextColumn(
+                    "Comentarios",
+                    help="Notas personales. Se guardan en disco y se sincronizan por Cuenta+Campaña al subir nuevos CSV.",
+                    width="large",
+                    max_chars=500,
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=min(600, 60 + len(filtered_audit) * 38),
+            key="audit_editor",
+        )
+
+        # Detectar cambios contra lo almacenado y persistir
+        cambios = []
+        for _, row in edited.iterrows():
+            prev_rev, prev_com = comments_store.hydrate(row["Cuenta"], row["Campaña"])
+            new_rev = bool(row["Revisada"])
+            new_com = (row.get("Comentarios") or "").strip()
+            if new_rev != prev_rev or new_com != prev_com:
+                cambios.append({
+                    "cuenta": row["Cuenta"],
+                    "campana": row["Campaña"],
+                    "revisada": new_rev,
+                    "comentario": new_com,
+                })
+
+        if cambios:
+            comments_store.sync_bulk(cambios)
+            st.toast(f"💾 {len(cambios)} cambio(s) guardado(s)", icon="✅")
+
+        # Botones de acción
+        c_dl, c_clr, c_info = st.columns([1, 1, 2])
+        with c_dl:
+            csv_audit = edited.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Descargar auditoría (CSV)",
+                csv_audit,
+                f"auditoria_{latest_date.strftime('%Y%m%d')}.csv",
+                "text/csv",
+                use_container_width=True,
+            )
+        with c_clr:
+            if st.button("🗑️ Limpiar todo el historial", use_container_width=True):
+                comments_store.save_all({})
+                st.toast("Historial borrado", icon="🗑️")
+                st.rerun()
+        with c_info:
+            total_persisted = len(comments_store.load_all())
+            st.caption(f"💾 {total_persisted} entrada(s) guardadas en `.audit_state.json`")
 
 # ── Tab 1: Sin movimiento HOY ─────────────────────────────────────────────────
 with tab1:
