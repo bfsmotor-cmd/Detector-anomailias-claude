@@ -239,13 +239,12 @@ with tab0:
             entry = stored.get(f"{row['Cuenta']}||{row['Campaña']}", {})
             return entry.get("comentario", "")
 
-        filtered_audit.insert(0, "#", range(1, len(filtered_audit) + 1))
         filtered_audit["Revisada"] = filtered_audit.apply(_stored_revisada, axis=1)
         filtered_audit["Comentarios"] = filtered_audit.apply(_stored_comentario, axis=1)
 
-        # Reordenar: 'Reglas activas' al final
+        # Reordenar: Score primero, 'Reglas activas' al final
         col_order = [
-            "#", "Cuenta", "Campaña", "Score",
+            "Score", "Cuenta", "Campaña",
             "Clicks hoy", "Clicks ayer", "Tasa conv. 7d", "Consumo presupuesto 7d",
             "Estado", "Motivo del estado", "Revisada", "Comentarios",
             "Reglas activas",
@@ -255,12 +254,12 @@ with tab0:
         edited = st.data_editor(
             filtered_audit,
             column_config={
-                "#": st.column_config.NumberColumn(width="small", disabled=True, pinned=True),
-                "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
-                "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
                 "Score": st.column_config.ProgressColumn(
                     "Score", min_value=0, max_value=156, format="%d",
+                    width="small", pinned=True,
                 ),
+                "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
+                "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
                 "Reglas activas": st.column_config.TextColumn(width="large", disabled=True),
                 "Clicks hoy": st.column_config.NumberColumn(disabled=True, width="small"),
                 "Clicks ayer": st.column_config.NumberColumn(disabled=True, width="small"),
@@ -307,7 +306,7 @@ with tab0:
         # Botones de acción
         c_dl, c_clr, c_info = st.columns([1, 1, 2])
         with c_dl:
-            csv_audit = edited.drop(columns=["#"]).to_csv(index=False).encode("utf-8")
+            csv_audit = edited.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "📥 Descargar auditoría (CSV)",
                 csv_audit,
