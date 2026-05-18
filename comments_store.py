@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Dict
 
 STORE_PATH = os.path.join(os.path.dirname(__file__), ".audit_state.json")
+SUGGESTIONS_PATH = os.path.join(os.path.dirname(__file__), ".suggestions_state.json")
 
 
 def _key(cuenta: str, campana: str) -> str:
@@ -78,3 +79,61 @@ def hydrate(cuenta: str, campana: str) -> tuple[bool, str]:
     """Devuelve (revisada, comentario) para una campaña."""
     entry = get(cuenta, campana)
     return bool(entry.get("revisada", False)), entry.get("comentario", "")
+
+
+# ─── Sugerencias de optimización ─────────────────────────────────────────────
+# Clave: 'Cuenta||Campaña||Categoría' — varias sugerencias por campaña.
+
+def _sug_key(cuenta: str, campana: str, categoria: str) -> str:
+    return f"{cuenta}||{campana}||{categoria}"
+
+
+def load_suggestions_state() -> Dict[str, dict]:
+    if not os.path.exists(SUGGESTIONS_PATH):
+        return {}
+    try:
+        with open(SUGGESTIONS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_suggestions_state(data: Dict[str, dict]) -> None:
+    tmp = SUGGESTIONS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SUGGESTIONS_PATH)
+
+
+def hydrate_suggestion(cuenta: str, campana: str, categoria: str) -> tuple[str, str, str]:
+    """Devuelve (estado, asignado_a, nota)."""
+    entry = load_suggestions_state().get(_sug_key(cuenta, campana, categoria), {})
+    return (
+        entry.get("estado", "Pendiente"),
+        entry.get("asignado_a", ""),
+        entry.get("nota", ""),
+    )
+
+
+def sync_suggestions_bulk(rows: list) -> None:
+    """rows: dicts con cuenta/campana/categoria/estado/asignado_a/nota."""
+    data = load_suggestions_state()
+    now = datetime.now().isoformat(timespec="seconds")
+    for r in rows:
+        k = _sug_key(r["cuenta"], r["campana"], r["categoria"])
+        estado = (r.get("estado") or "Pendiente").strip()
+        asignado = (r.get("asignado_a") or "").strip()
+        nota = (r.get("nota") or "").strip()
+        if estado == "Pendiente" and not asignado and not nota:
+            data.pop(k, None)
+            continue
+        data[k] = {
+            "cuenta": r["cuenta"],
+            "campana": r["campana"],
+            "categoria": r["categoria"],
+            "estado": estado,
+            "asignado_a": asignado,
+            "nota": nota,
+            "ultima_actualizacion": now,
+        }
+    save_suggestions_state(data)
