@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import timedelta
 import analyzer
+import comments_store
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -227,14 +228,20 @@ with tab0:
         if accounts_filter:
             filtered_audit = filtered_audit[filtered_audit["Cuenta"].isin(accounts_filter)]
 
-        # Añadir columna Revisada (estado en session_state por sesión)
-        if "revisadas" not in st.session_state:
-            st.session_state.revisadas = set()
+        # Hidratar Revisada + Comentarios desde almacenamiento local
+        stored = comments_store.load_all()
+
+        def _stored_revisada(row):
+            entry = stored.get(f"{row['Cuenta']}||{row['Campaña']}", {})
+            return bool(entry.get("revisada", False))
+
+        def _stored_comentario(row):
+            entry = stored.get(f"{row['Cuenta']}||{row['Campaña']}", {})
+            return entry.get("comentario", "")
 
         filtered_audit.insert(0, "#", range(1, len(filtered_audit) + 1))
-        filtered_audit["Revisada"] = filtered_audit["Campaña"].apply(
-            lambda c: c in st.session_state.revisadas
-        )
+        filtered_audit["Revisada"] = filtered_audit.apply(_stored_revisada, axis=1)
+        filtered_audit["Comentarios"] = filtered_audit.apply(_stored_comentario, axis=1)
 
         edited = st.data_editor(
             filtered_audit,
@@ -257,6 +264,12 @@ with tab0:
                 "Estado": st.column_config.TextColumn(disabled=True),
                 "Motivo del estado": st.column_config.TextColumn(disabled=True, width="medium"),
                 "Revisada": st.column_config.CheckboxColumn("Revisada", default=False),
+                "Comentarios": st.column_config.TextColumn(
+                    "Comentarios",
+                    help="Notas personales. Se guardan en disco y se sincronizan por Cuenta+Campaña al subir nuevos CSV.",
+                    width="large",
+                    max_chars=500,
+                ),
             },
             hide_index=True,
             use_container_width=True,
@@ -264,19 +277,43 @@ with tab0:
             key="audit_editor",
         )
 
-        # Actualizar estado de revisadas
-        st.session_state.revisadas = set(
-            edited.loc[edited["Revisada"], "Campaña"].tolist()
-        )
+        # Detectar cambios contra lo almacenado y persistir
+        cambios = []
+        for _, row in edited.iterrows():
+            prev_rev, prev_com = comments_store.hydrate(row["Cuenta"], row["Campaña"])
+            new_rev = bool(row["Revisada"])
+            new_com = (row.get("Comentarios") or "").strip()
+            if new_rev != prev_rev or new_com != prev_com:
+                cambios.append({
+                    "cuenta": row["Cuenta"],
+                    "campana": row["Campaña"],
+                    "revisada": new_rev,
+                    "comentario": new_com,
+                })
 
-        # Exportar CSV
-        csv_audit = audit.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "📥 Descargar auditoría completa (CSV)",
-            csv_audit,
-            f"auditoria_{latest_date.strftime('%Y%m%d')}.csv",
-            "text/csv",
-        )
+        if cambios:
+            comments_store.sync_bulk(cambios)
+            st.toast(f"💾 {len(cambios)} cambio(s) guardado(s)", icon="✅")
+
+        # Botones de acción
+        c_dl, c_clr, c_info = st.columns([1, 1, 2])
+        with c_dl:
+            csv_audit = edited.drop(columns=["#"]).to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Descargar auditoría (CSV)",
+                csv_audit,
+                f"auditoria_{latest_date.strftime('%Y%m%d')}.csv",
+                "text/csv",
+                use_container_width=True,
+            )
+        with c_clr:
+            if st.button("🗑️ Limpiar todo el historial", use_container_width=True):
+                comments_store.save_all({})
+                st.toast("Historial borrado", icon="🗑️")
+                st.rerun()
+        with c_info:
+            total_persisted = len(comments_store.load_all())
+            st.caption(f"💾 {total_persisted} entrada(s) guardadas en `.audit_state.json`")
 
 # ── Tab 1: Sin movimiento HOY ─────────────────────────────────────────────────
 with tab1:
