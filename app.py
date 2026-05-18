@@ -243,6 +243,15 @@ with tab0:
         filtered_audit["Revisada"] = filtered_audit.apply(_stored_revisada, axis=1)
         filtered_audit["Comentarios"] = filtered_audit.apply(_stored_comentario, axis=1)
 
+        # Reordenar: 'Reglas activas' al final
+        col_order = [
+            "#", "Cuenta", "Campaña", "Score",
+            "Clicks hoy", "Clicks ayer", "Tasa conv. 7d", "Consumo presupuesto 7d",
+            "Estado", "Motivo del estado", "Revisada", "Comentarios",
+            "Reglas activas",
+        ]
+        filtered_audit = filtered_audit[[c for c in col_order if c in filtered_audit.columns]]
+
         edited = st.data_editor(
             filtered_audit,
             column_config={
