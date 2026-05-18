@@ -246,9 +246,9 @@ with tab0:
         edited = st.data_editor(
             filtered_audit,
             column_config={
-                "#": st.column_config.NumberColumn(width="small", disabled=True),
-                "Cuenta": st.column_config.TextColumn(disabled=True),
-                "Campaña": st.column_config.TextColumn(disabled=True, width="medium"),
+                "#": st.column_config.NumberColumn(width="small", disabled=True, pinned=True),
+                "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
+                "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
                 "Score": st.column_config.ProgressColumn(
                     "Score", min_value=0, max_value=156, format="%d",
                 ),
