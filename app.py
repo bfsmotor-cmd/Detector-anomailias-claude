@@ -47,6 +47,14 @@ with st.sidebar:
     )
 
     st.divider()
+    st.subheader("Filtros")
+    show_paused = st.checkbox(
+        "Mostrar campañas pausadas",
+        value=False,
+        help="Por defecto se ocultan las campañas con estado 'Pausada'. Actívalo para incluirlas en métricas y tablas.",
+    )
+
+    st.divider()
     st.subheader("Parámetros")
     threshold_pct = st.slider(
         "Umbral de consumo de presupuesto (%)",
@@ -110,21 +118,34 @@ def load_data(file_bytes: bytes, filename: str) -> pd.DataFrame:
         dtype=str,
     )
 
-    # Filtrar filas de totales que mete Google Ads (Campaña empieza con "Total:")
+    # Filtrar filas de totales que mete Google Ads.
+    # Aparecen con "Estado de la campaña" = "Total: X" y la columna "Campaña" vacía.
     if "Campaña" in df_raw.columns:
+        df_raw = df_raw[df_raw["Campaña"].astype(str).str.strip().replace("nan", "") != ""]
         df_raw = df_raw[~df_raw["Campaña"].astype(str).str.startswith("Total:", na=False)]
-    # Filtrar filas vacías o de resumen al final
+    if "Estado de la campaña" in df_raw.columns:
+        df_raw = df_raw[~df_raw["Estado de la campaña"].astype(str).str.startswith("Total:", na=False)]
     df_raw = df_raw.dropna(how="all")
 
     return analyzer.load_and_clean(df_raw)
 
 
 try:
-    df = load_data(uploaded_file.read(), uploaded_file.name)
+    df_full = load_data(uploaded_file.read(), uploaded_file.name)
 except Exception as e:
     st.error(f"Error al procesar el archivo: {e}")
     st.info("Asegúrate de exportar el CSV con separador `;` o `,` y codificación UTF-8.")
     st.stop()
+
+# Filtrar campañas pausadas según toggle del sidebar
+PAUSED_STATUSES = {"En pausa", "Pausada", "Paused"}
+if show_paused:
+    df = df_full
+    paused_rows = 0
+else:
+    mask_paused = df_full["_estado"].isin(PAUSED_STATUSES)
+    paused_rows = int(mask_paused.sum())
+    df = df_full[~mask_paused].copy()
 
 summary = analyzer.general_summary(df)
 latest_date = summary["latest_date"]
@@ -134,7 +155,11 @@ yesterday = latest_date - timedelta(days=1) if latest_date else None
 
 st.title("Dashboard de Anomalías – Google Ads")
 date_min, date_max = summary["date_range"]
-st.caption(f"Datos del {date_min.strftime('%d/%m/%Y')} al {date_max.strftime('%d/%m/%Y')}  ·  Última fecha: **{latest_date.strftime('%d/%m/%Y')}**")
+caption = f"Datos del {date_min.strftime('%d/%m/%Y')} al {date_max.strftime('%d/%m/%Y')}  ·  Última fecha: **{latest_date.strftime('%d/%m/%Y')}**"
+if paused_rows > 0:
+    paused_campaigns = df_full[df_full["_estado"].isin(PAUSED_STATUSES)]["Campaña"].nunique()
+    caption += f"  ·  🔕 {paused_campaigns} campaña(s) pausadas ocultas ({paused_rows} filas)"
+st.caption(caption)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Cuentas", summary["total_accounts"])
