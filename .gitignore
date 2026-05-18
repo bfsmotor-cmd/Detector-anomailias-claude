@@ -30,6 +30,8 @@ downloads/
 # Estado local de auditoría (comentarios personales)
 .audit_state.json
 .audit_state.json.tmp
+.suggestions_state.json
+.suggestions_state.json.tmp
 
 # OS
 Thumbs.db

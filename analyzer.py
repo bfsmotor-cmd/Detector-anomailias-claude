@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 from datetime import timedelta
@@ -8,7 +10,73 @@ NUMERIC_COLS = [
     "Clics", "Conversiones", "CPC medio",
     "CPC medio (moneda convertida)", "Coste/conv.",
     "Coste (moneda convertida)/conv.", "Consumo L-V",
+    "Impresiones", "Impr.", "Valor de conv.", "Valor de conversión",
+    "CPA objetivo", "ROAS objetivo",
 ]
+
+PERCENT_COLS = [
+    "CTR", "CTR visible",
+    "Tasa de conv.", "Porcentaje de conversiones",
+    # Lost IS por presupuesto
+    "% impr. perdidas de búsq. (presup.)",
+    "Cuota impr. perdidas de parte sup. de búsqueda (presupuesto)",
+    "Cuota impr. perdidas de parte sup. abs. de búsqueda (presupuesto)",
+    "Porcentaje de impresiones de búsqueda perdidas (presupuesto)",
+    # Lost IS por ranking
+    "Cuota impr. perd. de búsq. (ranking)",
+    "Cuota impr. perdidas de parte sup. de búsqueda (ranking)",
+    "Cuota impr. perdidas de parte sup. abs. de búsqueda (ranking)",
+    "Porcentaje de impresiones de búsqueda perdidas (rank)",
+    "Porcentaje de impresiones de búsqueda perdidas (ranking)",
+    # Cuotas de búsqueda
+    "Cuota de impr. de búsqueda",
+    "Cuota impr. de parte sup. de búsqueda",
+    "Cuota impr. parte sup. absoluta de Búsqueda",
+    "Cuota de impresiones de búsqueda",
+    "Cuota de impresiones de búsqueda (parte superior abs.)",
+    "Cuota de impr. superior abs. de búsqueda",
+    # Opt Score
+    "Nivel de optimización", "Optimization score", "Optimization Score",
+]
+
+# Alias → nombre canónico interno. Si varias columnas mapean al mismo alias,
+# la primera presente gana (las siguientes se ignoran porque el alias ya existe).
+# Orden importante: poner primero los nombres reales del export Google Ads en español.
+COLUMN_ALIASES = {
+    "CTR": "_ctr",
+    "Impr.": "_impresiones",
+    "Impresiones": "_impresiones",
+    "Tasa de conv.": "_tasa_conv",
+    "Porcentaje de conversiones": "_tasa_conv",
+    "Valor de conv.": "_valor_conv",
+    "Valor de conversión": "_valor_conv",
+    "Valor conv./coste": "_roas",
+    # Estrategia de puja: priorizar "Tipo de estrategia de puja" (texto real
+    # como "Maximizar conversiones (CPA objetivo)"). La col "Estrategia de puja"
+    # del export suele venir como etiqueta '--'.
+    "Tipo de estrategia de puja": "_estrategia_puja",
+    "Estrategia de puja": "_estrategia_puja",
+    "CPA objetivo": "_tcpa",
+    "ROAS objetivo": "_troas",
+    # Lost IS — nombres reales del export español primero
+    "% impr. perdidas de búsq. (presup.)": "_lost_is_budget",
+    "Porcentaje de impresiones de búsqueda perdidas (presupuesto)": "_lost_is_budget",
+    "Cuota impr. perd. de búsq. (ranking)": "_lost_is_rank",
+    "Porcentaje de impresiones de búsqueda perdidas (rank)": "_lost_is_rank",
+    "Porcentaje de impresiones de búsqueda perdidas (ranking)": "_lost_is_rank",
+    "Cuota de impr. de búsqueda": "_search_is",
+    "Cuota de impresiones de búsqueda": "_search_is",
+    "Cuota impr. parte sup. absoluta de Búsqueda": "_top_abs_is",
+    "Cuota de impresiones de búsqueda (parte superior abs.)": "_top_abs_is",
+    "Cuota de impr. superior abs. de búsqueda": "_top_abs_is",
+    "Eficacia del anuncio": "_ad_strength",
+    "Detalles de la eficacia de los anuncios": "_ad_strength",
+    "Nivel de optimización": "_opt_score",
+    "Optimization score": "_opt_score",
+    "Optimization Score": "_opt_score",
+    "Tipo de campaña": "_tipo_campana",
+    "Subtipo de campaña": "_subtipo_campana",
+}
 
 ACTIVE_STATUSES = {"Habilitada", "Enabled", "Active", "Activa"}
 
@@ -34,6 +102,17 @@ def _parse_number(val):
         return np.nan
 
 
+def _parse_percent(val):
+    """Convierte '23,45%', '23,45', '< 10%' a float (0–100). NaN si no parseable."""
+    if pd.isna(val):
+        return np.nan
+    s = str(val).strip().replace("\xa0", "").replace(" ", "")
+    if s in ("", "-", "--", "—"):
+        return np.nan
+    s = s.lstrip("<>").replace("%", "")
+    return _parse_number(s)
+
+
 def load_and_clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -54,6 +133,16 @@ def load_and_clean(df: pd.DataFrame) -> pd.DataFrame:
     for col in NUMERIC_COLS:
         if col in df.columns:
             df[col] = df[col].apply(_parse_number)
+
+    # Limpiar columnas de porcentaje
+    for col in PERCENT_COLS:
+        if col in df.columns:
+            df[col] = df[col].apply(_parse_percent)
+
+    # Crear alias internos canónicos para acceso uniforme
+    for original, alias in COLUMN_ALIASES.items():
+        if original in df.columns and alias not in df.columns:
+            df[alias] = df[original]
 
     # Asegurar columna Cuenta
     if "Cuenta" not in df.columns:
@@ -330,4 +419,276 @@ def general_summary(df: pd.DataFrame) -> dict:
         "total_conversions": total_conversions,
         "latest_date": today_date,
         "date_range": get_date_range(df),
+    }
+
+
+# ─── Sugerencias de optimización ─────────────────────────────────────────────
+
+DEFAULT_OPT_THRESHOLDS = {
+    "lost_is_budget_high": 20.0,       # % impr. perdidas por presupuesto
+    "lost_is_rank_high": 30.0,         # % impr. perdidas por ranking
+    "min_clicks_no_conv": 30,          # clicks sin conv. para sugerir pausa
+    "tcpa_overshoot": 1.3,             # CPA real / tCPA > 1.3 → recalibrar
+    "ctr_min_search": 3.0,             # CTR mínimo Search (%)
+    "ctr_min_other": 1.0,              # CTR mínimo otros tipos (%)
+    "conv_rate_min": 5.0,              # Tasa conv. mínima cuando CTR es ok (%)
+    "roas_min": 1.5,                   # ROAS mínimo cuando hay valor configurado
+    "opt_score_min": 70.0,             # Optimization score mínimo (%)
+}
+
+
+def _has(df: pd.DataFrame, *cols) -> bool:
+    return all(c in df.columns for c in cols)
+
+
+def _severity(impact: int) -> str:
+    if impact >= 70:
+        return "Alta"
+    if impact >= 40:
+        return "Media"
+    return "Baja"
+
+
+def compute_optimization_suggestions(
+    df: pd.DataFrame,
+    thresholds: dict | None = None,
+    window_days: int = 7,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Sugerencias de optimización por campaña en una ventana de N días.
+    Tolera columnas faltantes: cada regla se evalúa solo si tiene los datos necesarios.
+
+    Returns:
+        (suggestions_df, disabled_rules) — la segunda lista contiene reglas que
+        no pudieron evaluarse por falta de columnas, para mostrar al usuario.
+    """
+    t = {**DEFAULT_OPT_THRESHOLDS, **(thresholds or {})}
+    disabled = []
+
+    if df.empty:
+        return pd.DataFrame(), disabled
+
+    recent_dates = _latest_n_dates(df, window_days)
+    if not recent_dates:
+        return pd.DataFrame(), disabled
+
+    recent = df[df["Día"].isin(recent_dates) & df["_activa"]].copy()
+    if recent.empty:
+        return pd.DataFrame(), disabled
+
+    # Agregaciones base por campaña
+    agg = {}
+    for src, name in [
+        ("Clics", "clics"), ("Coste", "coste"), ("Conversiones", "conv"),
+        ("Impresiones", "impr"), ("_impresiones", "impr"),
+        ("_valor_conv", "valor_conv"),
+    ]:
+        if src in recent.columns and name not in agg:
+            agg[name] = (src, "sum")
+
+    if not agg:
+        return pd.DataFrame(), disabled
+
+    base = recent.groupby(["Cuenta", "Campaña"]).agg(**agg).reset_index()
+
+    # Métricas calculadas
+    base["cpa"] = base["coste"] / base["conv"].replace(0, np.nan) if "conv" in base.columns else np.nan
+    if "impr" in base.columns and "clics" in base.columns:
+        base["ctr"] = (base["clics"] / base["impr"].replace(0, np.nan)) * 100
+    if "valor_conv" in base.columns:
+        base["roas"] = base["valor_conv"] / base["coste"].replace(0, np.nan)
+    if "conv" in base.columns and "clics" in base.columns:
+        base["conv_rate"] = (base["conv"] / base["clics"].replace(0, np.nan)) * 100
+
+    # Promedios (último valor disponible) de columnas no acumulables: estrategias, tCPA, % perdidas, etc.
+    last_row_cols = [
+        "_estrategia_puja", "_tcpa", "_troas",
+        "_lost_is_budget", "_lost_is_rank", "_search_is", "_top_abs_is",
+        "_ad_strength", "_opt_score", "_tipo_campana",
+    ]
+    avail_last = [c for c in last_row_cols if c in recent.columns]
+    if avail_last:
+        last_vals = (
+            recent.sort_values("Día")
+            .groupby(["Cuenta", "Campaña"])[avail_last]
+            .last()
+            .reset_index()
+        )
+        base = base.merge(last_vals, on=["Cuenta", "Campaña"], how="left")
+
+    # Reglas
+    suggestions = []
+
+    def _emit(row, categoria, diagnostico, accion, impacto, metricas):
+        suggestions.append({
+            "Cuenta": row["Cuenta"],
+            "Campaña": row["Campaña"],
+            "Categoría": categoria,
+            "Diagnóstico": diagnostico,
+            "Acción sugerida": accion,
+            "Severidad": _severity(impacto),
+            "Impacto": int(impacto),
+            "Métricas clave": metricas,
+        })
+
+    for _, row in base.iterrows():
+        clics = row.get("clics", 0) or 0
+        coste = row.get("coste", 0) or 0
+        conv = row.get("conv", 0) or 0
+        cpa = row.get("cpa", np.nan)
+        ctr = row.get("ctr", np.nan)
+        roas = row.get("roas", np.nan)
+        conv_rate = row.get("conv_rate", np.nan)
+        tipo = str(row.get("_tipo_campana", "")) if "_tipo_campana" in row else ""
+        is_search = "search" in tipo.lower() or "búsqueda" in tipo.lower() or not tipo
+
+        # Subir presupuesto
+        lost_b = row.get("_lost_is_budget", np.nan)
+        if pd.notna(lost_b) and lost_b > t["lost_is_budget_high"] and conv > 0:
+            cpa_ok = pd.isna(row.get("_tcpa")) or pd.isna(cpa) or cpa <= row["_tcpa"]
+            if cpa_ok:
+                impacto = min(100, 50 + int(lost_b))
+                _emit(row, "Presupuesto (subir)",
+                      f"Pierde {lost_b:.1f}% de impresiones por presupuesto limitado y tiene conversiones.",
+                      f"Aumentar el presupuesto diario ~{min(int(lost_b * 1.2), 100)}%; hay demanda no capturada con CPA saludable.",
+                      impacto,
+                      f"Lost IS (budget): {lost_b:.1f}% · Conv: {conv:.1f} · CPA: {cpa:.2f}" if pd.notna(cpa) else f"Lost IS (budget): {lost_b:.1f}% · Conv: {conv:.1f}")
+
+        # Mejorar ranking
+        lost_r = row.get("_lost_is_rank", np.nan)
+        if pd.notna(lost_r) and lost_r > t["lost_is_rank_high"]:
+            impacto = min(90, 40 + int(lost_r / 2))
+            _emit(row, "Ranking",
+                  f"Pierde {lost_r:.1f}% de impresiones por ranking (puja o calidad).",
+                  "Subir puja base, mejorar Quality Score de keywords o reforzar relevancia de anuncios/landing.",
+                  impacto,
+                  f"Lost IS (rank): {lost_r:.1f}% · CTR: {ctr:.2f}%" if pd.notna(ctr) else f"Lost IS (rank): {lost_r:.1f}%")
+
+        # Bajar / pausar
+        if conv == 0 and clics >= t["min_clicks_no_conv"] and coste > 0:
+            impacto = min(95, 55 + int(clics / 10))
+            _emit(row, "Presupuesto (reducir)",
+                  f"{int(clics)} clics y ${coste:.2f} gastados sin ninguna conversión en {window_days} días.",
+                  "Pausar o reducir presupuesto; revisar segmentación, keywords negativas y conversion tracking.",
+                  impacto,
+                  f"Clics: {int(clics)} · Coste: ${coste:.2f} · Conv: 0")
+
+        # Recalibrar tCPA
+        tcpa = row.get("_tcpa", np.nan)
+        if pd.notna(tcpa) and tcpa > 0 and pd.notna(cpa) and cpa > tcpa * t["tcpa_overshoot"]:
+            impacto = 65
+            _emit(row, "Puja",
+                  f"CPA real (${cpa:.2f}) supera el tCPA configurado (${tcpa:.2f}) en >{int((t['tcpa_overshoot']-1)*100)}%.",
+                  "Revisar tCPA: subirlo si el costo real es sostenible o auditar segmentación/keywords si no.",
+                  impacto,
+                  f"CPA real: ${cpa:.2f} · tCPA: ${tcpa:.2f} · Conv: {conv:.1f}")
+
+        # Estrategia inconsistente
+        estrategia = str(row.get("_estrategia_puja", "")).lower()
+        if estrategia and "maximizar clics" in estrategia and conv > 0:
+            impacto = 60
+            _emit(row, "Puja",
+                  "Estrategia 'Maximizar clics' aplicada a campaña con histórico de conversiones.",
+                  "Migrar a 'Maximizar conversiones' o tCPA para optimizar por valor en lugar de volumen de clics.",
+                  impacto,
+                  f"Estrategia: {row.get('_estrategia_puja')} · Conv: {conv:.1f}")
+
+        # CTR bajo
+        ctr_min = t["ctr_min_search"] if is_search else t["ctr_min_other"]
+        if pd.notna(ctr) and clics > 0 and ctr < ctr_min:
+            impacto = 45
+            _emit(row, "Anuncios",
+                  f"CTR {ctr:.2f}% por debajo del benchmark ({ctr_min:.1f}%) para tipo {tipo or 'Search'}.",
+                  "Revisar copy de anuncios (headlines/descriptions), añadir extensiones y revisar relevancia de keywords.",
+                  impacto,
+                  f"CTR: {ctr:.2f}% · Impr: {int(row.get('impr', 0))} · Clics: {int(clics)}")
+
+        # Tasa conv. baja con CTR ok
+        if pd.notna(ctr) and pd.notna(conv_rate) and ctr >= ctr_min and conv_rate < t["conv_rate_min"] and clics > 0:
+            impacto = 50
+            _emit(row, "Landing",
+                  f"CTR aceptable ({ctr:.2f}%) pero tasa de conversión baja ({conv_rate:.2f}%).",
+                  "El problema probable está en la landing: revisar velocidad, formularios, oferta y coincidencia con el anuncio.",
+                  impacto,
+                  f"CTR: {ctr:.2f}% · Conv rate: {conv_rate:.2f}% · Clics: {int(clics)}")
+
+        # Ad Strength pobre
+        ad_strength = str(row.get("_ad_strength", "")).strip().lower()
+        if ad_strength in {"pobre", "promedio", "poor", "average"}:
+            impacto = 55
+            _emit(row, "Anuncios",
+                  f"Eficacia del anuncio: {row.get('_ad_strength')}.",
+                  "Reescribir RSAs: añadir headlines/descriptions únicos, incluir keywords principales y CTAs claros.",
+                  impacto,
+                  f"Ad Strength: {row.get('_ad_strength')}")
+
+        # ROAS bajo — solo si la campaña trackea valor de conversión (valor > 0)
+        valor_conv = row.get("valor_conv", 0) or 0
+        if pd.notna(roas) and roas < t["roas_min"] and valor_conv > 0:
+            impacto = 60
+            _emit(row, "Rentabilidad",
+                  f"ROAS {roas:.2f}x por debajo del mínimo ({t['roas_min']:.1f}x).",
+                  "Revisar segmentación, pausar grupos no rentables o reajustar tROAS si la campaña usa puja por valor.",
+                  impacto,
+                  f"ROAS: {roas:.2f}x · Valor conv: ${row.get('valor_conv', 0):.2f} · Coste: ${coste:.2f}")
+
+        # Optimization Score bajo
+        opt = row.get("_opt_score", np.nan)
+        if pd.notna(opt) and opt < t["opt_score_min"]:
+            impacto = 35
+            _emit(row, "Calidad",
+                  f"Optimization Score: {opt:.1f}% (bajo).",
+                  "Revisar las recomendaciones nativas de Google Ads en la pestaña 'Recomendaciones'.",
+                  impacto,
+                  f"Opt. score: {opt:.1f}%")
+
+    # Reglas deshabilitadas por falta de columnas
+    rule_requirements = {
+        "Subir presupuesto / Mejorar ranking": "_lost_is_budget",
+        "ROAS bajo": "_valor_conv",
+        "CTR bajo / Tasa conv. baja": "_impresiones",
+        "Recalibrar tCPA": "_tcpa",
+        "Estrategia inconsistente": "_estrategia_puja",
+        "Ad Strength pobre": "_ad_strength",
+        "Optimization Score bajo": "_opt_score",
+    }
+    for rule, col in rule_requirements.items():
+        if col not in df.columns:
+            disabled.append(rule)
+
+    if not suggestions:
+        return pd.DataFrame(), disabled
+
+    sug_df = pd.DataFrame(suggestions)
+    # Las sugerencias de "subir presupuesto" se empujan al final del listado
+    # porque pedir aumento de presupuesto a clientes es la acción más difícil
+    # de ejecutar; primero deben verse las optimizaciones que no requieren
+    # incremento de inversión.
+    sug_df["_orden_categoria"] = (sug_df["Categoría"] == "Presupuesto (subir)").astype(int)
+    return (
+        sug_df.sort_values(
+            ["_orden_categoria", "Impacto", "Cuenta", "Campaña"],
+            ascending=[True, False, True, True],
+        )
+        .drop(columns="_orden_categoria")
+        .reset_index(drop=True),
+        disabled,
+    )
+
+
+def optimization_kpis(suggestions_df: pd.DataFrame) -> dict:
+    """KPIs gerenciales para el bloque analítico de la pestaña."""
+    if suggestions_df.empty:
+        return {
+            "total": 0, "alta": 0, "media": 0, "baja": 0,
+            "cuentas": 0, "campanas": 0, "por_categoria": {},
+        }
+    return {
+        "total": len(suggestions_df),
+        "alta": int((suggestions_df["Severidad"] == "Alta").sum()),
+        "media": int((suggestions_df["Severidad"] == "Media").sum()),
+        "baja": int((suggestions_df["Severidad"] == "Baja").sum()),
+        "cuentas": suggestions_df["Cuenta"].nunique(),
+        "campanas": suggestions_df["Campaña"].nunique(),
+        "por_categoria": suggestions_df["Categoría"].value_counts().to_dict(),
     }

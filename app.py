@@ -74,6 +74,15 @@ with st.sidebar:
     )
 
     st.divider()
+    st.subheader("Sugerencias de optimización")
+    opt_window_days = st.slider("Ventana de análisis (días)", 3, 30, 7, key="opt_window")
+    opt_lost_budget = st.slider("% impr. perdidas por presupuesto (mín)", 5, 50, 20, key="opt_lost_b")
+    opt_lost_rank = st.slider("% impr. perdidas por ranking (mín)", 10, 60, 30, key="opt_lost_r")
+    opt_min_clicks_no_conv = st.slider("Clics sin conversión para sugerir pausa", 10, 200, 30, key="opt_clicks_pause")
+    opt_ctr_search = st.slider("CTR mínimo Search (%)", 1, 10, 3, key="opt_ctr_s")
+    opt_roas_min = st.slider("ROAS mínimo (x)", 1, 10, 2, key="opt_roas")
+
+    st.divider()
     st.caption("v1.0 · Desarrollado con Streamlit")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -93,6 +102,12 @@ if uploaded_file is None:
     | 🟠 Sin movimiento ayer | Campañas activas sin clics ni coste el día anterior |
     | 🟡 Sin conversiones | Cuentas sin conversiones en los últimos N días |
     | 🔵 Presupuesto no consumido | Campañas que nunca alcanzaron el umbral de presupuesto |
+    | 🎯 Sugerencias de optimización | Vista proactiva: oportunidades de puja, ranking, anuncios, ROAS y calidad |
+
+    💡 Para aprovechar la pestaña **Sugerencias de optimización**, añade al export columnas adicionales como:
+    Impresiones, CTR, Tasa de conv., Valor de conv., Valor conv./coste (ROAS), Estrategia de puja, CPA/ROAS objetivo,
+    % impresiones perdidas (presupuesto/ranking), Eficacia del anuncio y Optimization score. La pestaña tolera columnas
+    faltantes y solo deshabilita las reglas que las necesitan.
     """)
     st.stop()
 
@@ -179,13 +194,14 @@ st.divider()
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🚨 Auditoría diaria",
     "🔴 Sin movimiento hoy",
     "🟠 Sin movimiento ayer",
     "🟡 Sin conversiones",
     "🔵 Presupuesto no consumido",
     "📊 Ranking de campañas",
+    "🎯 Sugerencias de optimización",
 ])
 
 # ── Tab 0: Auditoría diaria consolidada ──────────────────────────────────────
@@ -490,6 +506,172 @@ with tab5:
             )
             fig.update_layout(height=400, margin=dict(t=40, b=0))
             st.plotly_chart(fig, use_container_width=True)
+
+# ── Tab 6: Sugerencias de optimización ───────────────────────────────────────
+with tab6:
+    st.subheader(f"Sugerencias de optimización — últimos {opt_window_days} días")
+    st.caption(
+        "Vista proactiva: detecta oportunidades de optimización profunda por campaña "
+        "(puja, presupuesto, calidad de anuncios, ranking, rentabilidad). Una fila por sugerencia."
+    )
+
+    opt_thresholds = {
+        "lost_is_budget_high": float(opt_lost_budget),
+        "lost_is_rank_high": float(opt_lost_rank),
+        "min_clicks_no_conv": int(opt_min_clicks_no_conv),
+        "ctr_min_search": float(opt_ctr_search),
+        "roas_min": float(opt_roas_min),
+    }
+
+    suggestions, disabled_rules = analyzer.compute_optimization_suggestions(
+        df, thresholds=opt_thresholds, window_days=opt_window_days,
+    )
+
+    if disabled_rules:
+        st.info(
+            "ℹ️ Algunas reglas están deshabilitadas por columnas faltantes en el CSV: "
+            + ", ".join(disabled_rules)
+            + ". Añádelas al export de Google Ads para obtener más sugerencias."
+        )
+
+    kpis = analyzer.optimization_kpis(suggestions)
+
+    # KPIs gerenciales
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Sugerencias", kpis["total"])
+    k2.metric("Severidad Alta", kpis["alta"])
+    k3.metric("Severidad Media", kpis["media"])
+    k4.metric("Cuentas", kpis["cuentas"])
+    k5.metric("Campañas", kpis["campanas"])
+
+    if suggestions.empty:
+        st.success("✅ No se detectaron oportunidades de optimización con los umbrales actuales.")
+    else:
+        # Gráfico por categoría
+        if kpis["por_categoria"]:
+            cat_df = pd.DataFrame(
+                {"Categoría": list(kpis["por_categoria"].keys()),
+                 "Sugerencias": list(kpis["por_categoria"].values())}
+            ).sort_values("Sugerencias", ascending=True)
+            fig = px.bar(
+                cat_df, x="Sugerencias", y="Categoría", orientation="h",
+                color="Sugerencias", color_continuous_scale=["#6366f1", "#f97316", "#ef4444"],
+                title="Sugerencias por categoría",
+            )
+            fig.update_layout(height=280, margin=dict(t=40, b=0), coloraxis_showscale=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Filtros
+        ff1, ff2, ff3 = st.columns(3)
+        with ff1:
+            sev_filter = st.multiselect(
+                "Severidad", ["Alta", "Media", "Baja"], default=["Alta", "Media"],
+                key="opt_sev",
+            )
+        with ff2:
+            cat_filter = st.multiselect(
+                "Categoría", sorted(suggestions["Categoría"].unique()),
+                placeholder="Todas",
+                key="opt_cat",
+            )
+        with ff3:
+            acc_filter = st.multiselect(
+                "Cuenta", sorted(suggestions["Cuenta"].unique()),
+                placeholder="Todas",
+                key="opt_acc",
+            )
+
+        filt = suggestions.copy()
+        if sev_filter:
+            filt = filt[filt["Severidad"].isin(sev_filter)]
+        if cat_filter:
+            filt = filt[filt["Categoría"].isin(cat_filter)]
+        if acc_filter:
+            filt = filt[filt["Cuenta"].isin(acc_filter)]
+
+        # Hidratar estado guardado
+        sug_store = comments_store.load_suggestions_state()
+
+        def _sg(row, field, default=""):
+            entry = sug_store.get(f"{row['Cuenta']}||{row['Campaña']}||{row['Categoría']}", {})
+            return entry.get(field, default)
+
+        filt["Estado"] = filt.apply(lambda r: _sg(r, "estado", "Pendiente"), axis=1)
+        filt["Asignado a"] = filt.apply(lambda r: _sg(r, "asignado_a", ""), axis=1)
+        filt["Nota"] = filt.apply(lambda r: _sg(r, "nota", ""), axis=1)
+
+        col_order = [
+            "Impacto", "Severidad", "Categoría", "Cuenta", "Campaña",
+            "Diagnóstico", "Acción sugerida", "Métricas clave",
+            "Estado", "Asignado a", "Nota",
+        ]
+        filt = filt[[c for c in col_order if c in filt.columns]]
+
+        edited_sug = st.data_editor(
+            filt,
+            column_config={
+                "Impacto": st.column_config.ProgressColumn(
+                    "Impacto", min_value=0, max_value=100, format="%d",
+                    width="small", pinned=True,
+                ),
+                "Severidad": st.column_config.TextColumn(disabled=True, width="small"),
+                "Categoría": st.column_config.TextColumn(disabled=True, width="small"),
+                "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
+                "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
+                "Diagnóstico": st.column_config.TextColumn(disabled=True, width="large"),
+                "Acción sugerida": st.column_config.TextColumn(disabled=True, width="large"),
+                "Métricas clave": st.column_config.TextColumn(disabled=True, width="medium"),
+                "Estado": st.column_config.SelectboxColumn(
+                    "Estado", options=["Pendiente", "En curso", "Hecho", "Descartada"],
+                    default="Pendiente", required=True,
+                ),
+                "Asignado a": st.column_config.TextColumn("Asignado a", max_chars=80),
+                "Nota": st.column_config.TextColumn("Nota", max_chars=500, width="large"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=min(700, 60 + len(filt) * 38),
+            key="opt_editor",
+        )
+
+        # Persistir cambios
+        cambios = []
+        for _, row in edited_sug.iterrows():
+            prev_est, prev_asig, prev_nota = comments_store.hydrate_suggestion(
+                row["Cuenta"], row["Campaña"], row["Categoría"],
+            )
+            new_est = row.get("Estado", "Pendiente") or "Pendiente"
+            new_asig = (row.get("Asignado a") or "").strip()
+            new_nota = (row.get("Nota") or "").strip()
+            if new_est != prev_est or new_asig != prev_asig or new_nota != prev_nota:
+                cambios.append({
+                    "cuenta": row["Cuenta"],
+                    "campana": row["Campaña"],
+                    "categoria": row["Categoría"],
+                    "estado": new_est,
+                    "asignado_a": new_asig,
+                    "nota": new_nota,
+                })
+
+        if cambios:
+            comments_store.sync_suggestions_bulk(cambios)
+            st.toast(f"💾 {len(cambios)} sugerencia(s) actualizada(s)", icon="✅")
+
+        # Descarga
+        d1, d2 = st.columns([1, 3])
+        with d1:
+            csv_sug = edited_sug.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Descargar sugerencias (CSV)",
+                csv_sug,
+                f"sugerencias_{latest_date.strftime('%Y%m%d')}.csv",
+                "text/csv",
+                use_container_width=True,
+            )
+        with d2:
+            total_p = len(comments_store.load_suggestions_state())
+            st.caption(f"💾 {total_p} sugerencia(s) con estado guardado en `.suggestions_state.json`")
+
 
 # ─── Footer ──────────────────────────────────────────────────────────────────
 st.divider()
