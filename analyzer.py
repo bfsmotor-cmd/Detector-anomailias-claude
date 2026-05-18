@@ -200,6 +200,118 @@ def rank_campaigns(df: pd.DataFrame, period_days: int = 30) -> pd.DataFrame:
     return summary.reset_index(drop=True)
 
 
+# ─── Auditoría diaria: tabla consolidada con score ──────────────────────────
+
+RULE_WEIGHTS = {
+    "sin_mov_hoy": 50,
+    "sin_mov_ayer": 40,
+    "sin_conv": 35,
+    "tasa_conv_baja": 20,
+    "consumo_bajo": 11,
+}
+
+
+def compute_anomaly_table(
+    df: pd.DataFrame,
+    conv_rate_threshold: float = 0.10,
+    budget_threshold: float = 0.80,
+    conv_days: int = 3,
+    budget_days: int = 7,
+) -> pd.DataFrame:
+    """
+    Tabla consolidada de auditoría diaria. Una fila por campaña que dispare
+    al menos una regla, con score, reglas activas y métricas clave.
+    """
+    if df.empty:
+        return pd.DataFrame()
+
+    dates_sorted = sorted(df["Día"].dropna().unique(), reverse=True)
+    if not dates_sorted:
+        return pd.DataFrame()
+
+    latest = pd.Timestamp(dates_sorted[0])
+    yday = pd.Timestamp(dates_sorted[1]) if len(dates_sorted) > 1 else None
+    last_7 = [pd.Timestamp(d) for d in dates_sorted[:budget_days]]
+    last_3 = [pd.Timestamp(d) for d in dates_sorted[:conv_days]]
+
+    df_today = df[df["Día"] == latest]
+    df_yday = df[df["Día"] == yday] if yday is not None else df.iloc[0:0]
+    df_7d = df[df["Día"].isin(last_7)]
+    df_3d = df[df["Día"].isin(last_3)]
+
+    def _sum(d, cuenta, camp, col):
+        s = d[(d["Cuenta"] == cuenta) & (d["Campaña"] == camp)]
+        return float(s[col].sum()) if col in s.columns else 0.0
+
+    rows = []
+    for (cuenta, camp), group in df.groupby(["Cuenta", "Campaña"]):
+        if not group["_activa"].any():
+            continue
+
+        clicks_today = _sum(df_today, cuenta, camp, "Clics")
+        clicks_yday = _sum(df_yday, cuenta, camp, "Clics") if yday is not None else 0
+        cost_today = _sum(df_today, cuenta, camp, "Coste")
+        clicks_7d = _sum(df_7d, cuenta, camp, "Clics")
+        conv_7d = _sum(df_7d, cuenta, camp, "Conversiones")
+        cost_7d = _sum(df_7d, cuenta, camp, "Coste")
+        budget_7d = _sum(df_7d, cuenta, camp, "Presupuesto")
+        conv_3d = _sum(df_3d, cuenta, camp, "Conversiones")
+
+        conv_rate_7d = conv_7d / clicks_7d if clicks_7d > 0 else 0.0
+        budget_consumption_7d = cost_7d / budget_7d if budget_7d > 0 else 0.0
+
+        reglas = []
+        score = 0
+
+        if clicks_today == 0 and cost_today == 0:
+            reglas.append("Sin movimiento hoy (Clicks=0)")
+            score += RULE_WEIGHTS["sin_mov_hoy"]
+        if yday is not None and clicks_yday == 0:
+            reglas.append("Sin movimiento ayer (Clicks=0)")
+            score += RULE_WEIGHTS["sin_mov_ayer"]
+        if conv_3d == 0:
+            reglas.append(f"Sin conversiones en {conv_days} días")
+            score += RULE_WEIGHTS["sin_conv"]
+        if clicks_7d > 0 and conv_rate_7d < conv_rate_threshold:
+            reglas.append(f"Tasa de conversión 7d < {int(conv_rate_threshold*100)}%")
+            score += RULE_WEIGHTS["tasa_conv_baja"]
+        if budget_7d > 0 and budget_consumption_7d < budget_threshold:
+            reglas.append(f"Consumo presupuesto 7d < {int(budget_threshold*100)}%")
+            score += RULE_WEIGHTS["consumo_bajo"]
+
+        if not reglas:
+            continue
+
+        # Estado más reciente de la campaña
+        latest_row = group.sort_values("Día").iloc[-1]
+        estado_val = latest_row.get("Estado", "")
+        motivo_val = latest_row.get("Motivos del estado", "")
+        estado = "" if pd.isna(estado_val) else str(estado_val)
+        motivo = "" if pd.isna(motivo_val) else str(motivo_val)
+
+        rows.append({
+            "Cuenta": cuenta,
+            "Campaña": camp,
+            "Score": score,
+            "Reglas activas": " | ".join(reglas),
+            "Clicks hoy": int(clicks_today),
+            "Clicks ayer": int(clicks_yday),
+            "Tasa conv. 7d": round(conv_rate_7d * 100, 1),
+            "Consumo presupuesto 7d": round(budget_consumption_7d * 100, 1),
+            "Estado": estado,
+            "Motivo del estado": motivo,
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("Score", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
 # ─── Resumen general ─────────────────────────────────────────────────────────
 
 def general_summary(df: pd.DataFrame) -> dict:

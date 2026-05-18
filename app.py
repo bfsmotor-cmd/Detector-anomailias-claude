@@ -66,6 +66,13 @@ with st.sidebar:
     ranking_days = st.slider("Ventana ranking (días)", 7, 90, 30)
 
     st.divider()
+    st.subheader("Reglas auditoría")
+    conv_rate_threshold_pct = st.slider(
+        "Tasa de conversión 7d mínima (%)", 1, 50, 10,
+        help="Campañas con tasa < a este valor se marcan como anomalía.",
+    )
+
+    st.divider()
     st.caption("v1.0 · Desarrollado con Streamlit")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -171,13 +178,105 @@ st.divider()
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🚨 Auditoría diaria",
     "🔴 Sin movimiento hoy",
     "🟠 Sin movimiento ayer",
     "🟡 Sin conversiones",
     "🔵 Presupuesto no consumido",
     "📊 Ranking de campañas",
 ])
+
+# ── Tab 0: Auditoría diaria consolidada ──────────────────────────────────────
+with tab0:
+    st.subheader("Auditoría diaria — campañas con anomalías")
+    st.caption(
+        "Una fila por campaña que dispare al menos una regla. Score = suma ponderada de las "
+        "reglas activas (50/40/35/20/11). Ordenado por mayor score."
+    )
+
+    audit = analyzer.compute_anomaly_table(
+        df,
+        conv_rate_threshold=conv_rate_threshold_pct / 100,
+        budget_threshold=threshold_pct / 100,
+        conv_days=conv_days,
+        budget_days=budget_days,
+    )
+
+    if audit.empty:
+        st.success("✅ Ninguna campaña activa dispara reglas de anomalía.")
+    else:
+        # KPIs rápidos
+        kc1, kc2, kc3, kc4 = st.columns(4)
+        kc1.metric("Campañas con anomalía", len(audit))
+        kc2.metric("Score máximo", int(audit["Score"].max()))
+        kc3.metric("Score promedio", round(audit["Score"].mean(), 1))
+        kc4.metric("Cuentas afectadas", audit["Cuenta"].nunique())
+
+        # Filtros
+        f1, f2 = st.columns([1, 2])
+        with f1:
+            min_score = st.number_input("Score mínimo", 0, int(audit["Score"].max()), 0, 5)
+        with f2:
+            accounts_filter = st.multiselect(
+                "Filtrar por cuenta", sorted(audit["Cuenta"].unique()),
+                placeholder="Todas las cuentas",
+            )
+
+        filtered_audit = audit[audit["Score"] >= min_score].copy()
+        if accounts_filter:
+            filtered_audit = filtered_audit[filtered_audit["Cuenta"].isin(accounts_filter)]
+
+        # Añadir columna Revisada (estado en session_state por sesión)
+        if "revisadas" not in st.session_state:
+            st.session_state.revisadas = set()
+
+        filtered_audit.insert(0, "#", range(1, len(filtered_audit) + 1))
+        filtered_audit["Revisada"] = filtered_audit["Campaña"].apply(
+            lambda c: c in st.session_state.revisadas
+        )
+
+        edited = st.data_editor(
+            filtered_audit,
+            column_config={
+                "#": st.column_config.NumberColumn(width="small", disabled=True),
+                "Cuenta": st.column_config.TextColumn(disabled=True),
+                "Campaña": st.column_config.TextColumn(disabled=True, width="medium"),
+                "Score": st.column_config.ProgressColumn(
+                    "Score", min_value=0, max_value=156, format="%d",
+                ),
+                "Reglas activas": st.column_config.TextColumn(width="large", disabled=True),
+                "Clicks hoy": st.column_config.NumberColumn(disabled=True, width="small"),
+                "Clicks ayer": st.column_config.NumberColumn(disabled=True, width="small"),
+                "Tasa conv. 7d": st.column_config.NumberColumn(
+                    "Tasa conv. 7d", format="%.1f%%", disabled=True,
+                ),
+                "Consumo presupuesto 7d": st.column_config.NumberColumn(
+                    "Consumo ppto. 7d", format="%.1f%%", disabled=True,
+                ),
+                "Estado": st.column_config.TextColumn(disabled=True),
+                "Motivo del estado": st.column_config.TextColumn(disabled=True, width="medium"),
+                "Revisada": st.column_config.CheckboxColumn("Revisada", default=False),
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=min(600, 60 + len(filtered_audit) * 38),
+            key="audit_editor",
+        )
+
+        # Actualizar estado de revisadas
+        st.session_state.revisadas = set(
+            edited.loc[edited["Revisada"], "Campaña"].tolist()
+        )
+
+        # Exportar CSV
+        csv_audit = audit.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "📥 Descargar auditoría completa (CSV)",
+            csv_audit,
+            f"auditoria_{latest_date.strftime('%Y%m%d')}.csv",
+            "text/csv",
+        )
 
 # ── Tab 1: Sin movimiento HOY ─────────────────────────────────────────────────
 with tab1:
