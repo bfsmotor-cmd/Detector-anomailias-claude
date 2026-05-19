@@ -218,3 +218,94 @@ def aggregate_by_campaign(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
 
     out = pd.DataFrame(rows)
     return out.sort_values("score_promedio", ascending=True, na_position="last").reset_index(drop=True)
+
+
+# ── Negativas sugeridas por sustracción de vocabulario ────────────────────────
+
+_STOPWORDS = {
+    "de", "del", "la", "las", "el", "los", "en", "y", "a", "con", "para",
+    "por", "un", "una", "unos", "unas", "al", "o", "que", "se", "su",
+    "the", "of", "in", "and", "for", "to", "a", "an",
+}
+
+
+def _word_covered(word: str, kw_vocab: set, min_prefix: int = 4) -> bool:
+    """True si `word` está cubierta por alguna palabra del vocabulario de keywords.
+
+    Usa prefijo compartido para que 'termometro' matchee 'termometros', etc.
+    """
+    if len(word) < min_prefix:
+        return word in kw_vocab
+    w_prefix = word[:min_prefix]
+    for kw_word in kw_vocab:
+        if len(kw_word) >= min_prefix and kw_word[:min_prefix] == w_prefix:
+            return True
+        elif len(kw_word) < min_prefix and kw_word == word:
+            return True
+    return False
+
+
+def compute_negative_suggestions(df: pd.DataFrame) -> pd.DataFrame:
+    """Genera palabras negativas sugeridas por sustracción de vocabulario.
+
+    Para cada término de búsqueda resta las palabras ya cubiertas por las
+    keywords de esa cuenta. Las palabras sobrantes son candidatas a negativa.
+
+    Ejemplo:
+        Término:  'termometro IPXD23'
+        Keywords: 'termometros', 'termometros medellin', 'termometros industriales'
+        Vocab:    {termometros, medellin, industriales}
+        Cubierto: 'termometro' → sí (prefijo compartido con 'termometros')
+        Sobra:    'IPXD23'  → negativa sugerida
+
+    Retorna DataFrame con una fila por término que tiene palabras no cubiertas.
+    """
+    valid = df[~df["_sin_keyword"]].copy()
+    rows = []
+
+    for cuenta, grupo in valid.groupby("Cuenta", dropna=False):
+        cuenta_str = cuenta if pd.notna(cuenta) else "Sin cuenta"
+
+        # Vocabulario de todas las palabras en keywords de esta cuenta
+        kw_vocab: set = set()
+        for kw_raw in grupo["Palabra clave"].dropna():
+            for word in _normalize(kw_raw).split():
+                if word not in _STOPWORDS and len(word) >= 2:
+                    kw_vocab.add(word)
+
+        for _, fila in grupo.iterrows():
+            termino_raw = fila["Término de búsqueda"]
+            termino_norm = _normalize(str(termino_raw))
+            term_words = [
+                w for w in termino_norm.split()
+                if w not in _STOPWORDS and len(w) >= 2
+            ]
+            if not term_words:
+                continue
+
+            no_cubiertas = [
+                w for w in term_words
+                if not _word_covered(w, kw_vocab)
+            ]
+
+            if not no_cubiertas:
+                continue
+
+            rows.append({
+                "Cuenta": cuenta_str,
+                "Término de búsqueda": termino_raw,
+                "Campaña": fila.get("Campaña", ""),
+                "Palabra clave": fila.get("Palabra clave", ""),
+                "palabras_no_cubiertas": " | ".join(no_cubiertas),
+                "Clics": fila.get("Clics", np.nan),
+                "Coste": fila.get("Coste", np.nan),
+                "Conversiones": fila.get("Conversiones", np.nan),
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=[
+            "Cuenta", "Término de búsqueda", "Campaña", "Palabra clave",
+            "palabras_no_cubiertas", "Clics", "Coste", "Conversiones",
+        ])
+
+    return pd.DataFrame(rows)

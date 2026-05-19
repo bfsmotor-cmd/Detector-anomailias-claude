@@ -295,52 +295,55 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
 
     st.divider()
 
-    # ── Negativas sugeridas por cuenta ──────────────────────────────────────
+    # ── Negativas sugeridas por sustracción de vocabulario ──────────────────
     st.subheader("🚫 Negativas sugeridas por cuenta")
     st.caption(
-        "Términos con score de similitud < 50 agrupados por cuenta. "
-        "Formato exacto `[término]` listo para copiar y pegar en Google Ads."
+        "Para cada término se restan las palabras ya cubiertas por las keywords de esa cuenta. "
+        "Las palabras sobrantes son las candidatas a negativa exacta `[término]`."
     )
 
-    neg_df = df_terms[
-        (~df_terms["_sin_keyword"]) & (df_terms["_score_similitud"] < 50)
-    ].copy()
+    neg_sugeridas = search_terms_analyzer.compute_negative_suggestions(df_terms)
 
-    cuentas_con_negativas = (
-        neg_df.groupby("Cuenta")["Término de búsqueda"]
-        .nunique()
-        .reset_index(name="n_negativas")
-        .sort_values("n_negativas", ascending=False)
-    )
-
-    if cuentas_con_negativas.empty:
-        st.success("No hay términos con score < 50% en ninguna cuenta.")
+    if neg_sugeridas.empty:
+        st.success("No se encontraron palabras sin cubrir en ninguna cuenta.")
     else:
-        st.caption(f"{len(cuentas_con_negativas)} cuenta(s) con negativas sugeridas.")
-        for _, row in cuentas_con_negativas.iterrows():
-            cuenta_neg = row["Cuenta"]
-            n_neg = int(row["n_negativas"])
-            cuenta_data = neg_df[neg_df["Cuenta"] == cuenta_neg].copy()
-            total_coste_neg = float(cuenta_data["Coste"].fillna(0).sum()) if "Coste" in cuenta_data else 0.0
+        resumen_neg = (
+            neg_sugeridas.groupby("Cuenta")
+            .agg(
+                n_terminos=("Término de búsqueda", "nunique"),
+                total_coste=("Coste", lambda x: x.fillna(0).sum()),
+            )
+            .reset_index()
+            .sort_values("n_terminos", ascending=False)
+        )
+        st.caption(f"{len(resumen_neg)} cuenta(s) con términos que contienen palabras no cubiertas por sus keywords.")
 
-            label = f"{cuenta_neg}  —  {n_neg} negativa(s) sugeridas"
+        for _, row in resumen_neg.iterrows():
+            cuenta_neg = row["Cuenta"]
+            n_neg = int(row["n_terminos"])
+            total_coste_neg = float(row["total_coste"])
+
+            label = f"{cuenta_neg}  —  {n_neg} término(s) con palabras no cubiertas"
             if total_coste_neg > 0:
                 label += f"  ·  Coste acumulado: ${total_coste_neg:,.0f}"
 
             expanded = cuenta_neg == sel_cuenta
             with st.expander(label, expanded=expanded):
-                # Tabla de detalle de negativas
-                cols_neg = ["Término de búsqueda", "Palabra clave", "Campaña",
-                            "Clics", "Coste", "Conversiones", "_score_similitud"]
-                cols_neg_ok = [c for c in cols_neg if c in cuenta_data.columns]
-                cuenta_data_sorted = cuenta_data.sort_values("_score_similitud", ascending=True)
+                cuenta_neg_data = neg_sugeridas[neg_sugeridas["Cuenta"] == cuenta_neg].copy()
+
                 st.dataframe(
-                    cuenta_data_sorted[cols_neg_ok].drop_duplicates(subset=["Término de búsqueda"]),
+                    cuenta_neg_data[[
+                        "Término de búsqueda", "palabras_no_cubiertas",
+                        "Palabra clave", "Campaña",
+                        "Clics", "Coste", "Conversiones",
+                    ]],
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "_score_similitud": st.column_config.ProgressColumn(
-                            "Score", min_value=0, max_value=100, format="%.1f",
+                        "palabras_no_cubiertas": st.column_config.TextColumn(
+                            "Palabras no cubiertas",
+                            help="Palabras del término que no aparecen en ninguna keyword de esta cuenta.",
+                            width="medium",
                         ),
                         "Clics": st.column_config.NumberColumn("Clics", format="%.0f"),
                         "Coste": st.column_config.NumberColumn("Coste", format="%.2f"),
@@ -348,12 +351,12 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
                     },
                 )
 
-                # Bloque copiable en formato exacto [término]
+                # Bloque copiable: el término completo como negativa exacta
                 terminos_unicos = sorted(
-                    cuenta_data["Término de búsqueda"].dropna().unique().tolist()
+                    cuenta_neg_data["Término de búsqueda"].dropna().unique().tolist()
                 )
                 negativas_texto = "\n".join(f"[{t}]" for t in terminos_unicos)
-                st.caption("Copiar como negativas exactas:")
+                st.caption("Copiar como negativas exactas (términos completos):")
                 st.code(negativas_texto, language=None)
 
 
