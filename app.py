@@ -56,6 +56,13 @@ with st.sidebar:
         key="search_terms_upl",
         help="Export del 'Informe de términos de búsqueda' de Google Ads.",
     )
+    keywords_file = st.file_uploader(
+        "Sábana de palabras clave (todas las cuentas)",
+        type=["csv"],
+        key="keywords_upl",
+        help="Export con columnas Cuenta, Campaña, Palabra clave de todas las campañas. "
+             "Se usa para calificar cada término contra el vocabulario completo de su campaña.",
+    )
     quality_threshold = st.slider(
         "Umbral de calidad (%)",
         50, 90, 70,
@@ -126,34 +133,82 @@ if uploaded_file is None and search_terms_file is None:
     % impresiones perdidas (presupuesto/ranking), Eficacia del anuncio y Optimization score. La pestaña tolera columnas
     faltantes y solo deshabilita las reglas que las necesitan.
 
-    🔎 Para la pestaña **Calidad de términos de búsqueda**, exporta el "Informe de términos de búsqueda" desde Google Ads
-    (incluye las columnas `Término de búsqueda`, `Palabra clave`, `Campaña`, `Cuenta`, `Clics`, `Coste`...). Súbelo en el
-    uploader independiente del sidebar — funciona aún sin el reporte diario.
+    🔎 Para la pestaña **Calidad de términos de búsqueda** necesitas **dos archivos**:
+    1. El "Informe de términos de búsqueda" (columnas `Término de búsqueda`, `Palabra clave`, `Campaña`, `Cuenta`, `Clics`, `Coste`...).
+    2. La **sábana de palabras clave** con todas las KW activas (columnas `Cuenta`, `Campaña`, `Palabra clave`).
+
+    Cada término se califica por el **% de palabras** que están en el vocabulario de las KW de su misma campaña.
+    Funciona sin el reporte diario; solo necesita los dos uploaders independientes del sidebar.
     """)
     st.stop()
 
 
 # ─── Calidad de términos de búsqueda ─────────────────────────────────────────
 
-@st.cache_data(show_spinner="Calculando similitud de términos…")
-def load_search_terms(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    df_terms = search_terms_analyzer.load_search_terms_csv(file_bytes)
-    return search_terms_analyzer.compute_similarity(df_terms)
+@st.cache_data(show_spinner="Cargando términos de búsqueda…")
+def load_search_terms_raw(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    return search_terms_analyzer.load_search_terms_csv(file_bytes)
 
 
-def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int):
+@st.cache_data(show_spinner="Construyendo vocabulario de palabras clave…")
+def load_keywords_vocab(file_bytes: bytes, filename: str) -> dict:
+    df_kw = search_terms_analyzer.load_keywords_csv(file_bytes)
+    return search_terms_analyzer.build_campaign_vocab(df_kw)
+
+
+def render_search_terms_section(
+    file_bytes: bytes,
+    filename: str,
+    kw_file_bytes: bytes,
+    kw_filename: str,
+    threshold: int,
+):
     st.header("🔎 Calidad de términos de búsqueda")
     st.caption(
-        "Score de similitud (0–100) entre `Término de búsqueda` y `Palabra clave`. "
-        "Las cuentas se ponderan por clics; las que estén por debajo del umbral generan alerta."
+        "Score de cobertura (0–100): % de palabras del término que están en el vocabulario "
+        "de las palabras clave de su **misma campaña** (stopwords excluidas, matching por "
+        "prefijo de 4 caracteres). Las cuentas se ponderan por clics; las que estén por "
+        "debajo del umbral generan alerta."
     )
 
     try:
-        df_terms = load_search_terms(file_bytes, filename)
+        df_terms = load_search_terms_raw(file_bytes, filename)
     except Exception as e:
         st.error(f"Error al procesar el reporte de términos: {e}")
         st.info("Asegúrate de exportar el 'Informe de términos de búsqueda' con codificación UTF-8.")
         return
+
+    try:
+        campaign_vocab = load_keywords_vocab(kw_file_bytes, kw_filename)
+    except Exception as e:
+        st.error(f"Error al procesar la sábana de palabras clave: {e}")
+        st.info("La sábana debe traer columnas `Cuenta`, `Campaña`, `Palabra clave` con codificación UTF-8.")
+        return
+
+    df_terms = search_terms_analyzer.compute_coverage_score(df_terms, campaign_vocab)
+
+    # Diagnóstico de cobertura del vocabulario
+    campañas_en_terminos = set(
+        search_terms_analyzer._normalize(c)
+        for c in df_terms.get("Campaña", pd.Series(dtype=str)).dropna().unique()
+        if str(c).strip()
+    )
+    campañas_en_vocab = set(campaign_vocab.keys())
+    matched = campañas_en_terminos & campañas_en_vocab
+    if campañas_en_terminos and not matched:
+        st.error(
+            f"⚠️ Ninguna de las {len(campañas_en_terminos)} campañas del reporte de términos "
+            f"coincide con las {len(campañas_en_vocab)} campañas de la sábana de KW. "
+            f"Verifica que ambos archivos usan los mismos nombres de campaña."
+        )
+    elif campañas_en_terminos:
+        cobertura_pct = 100.0 * len(matched) / len(campañas_en_terminos)
+        if cobertura_pct < 100:
+            st.warning(
+                f"ℹ️ Vocabulario cargado para {len(matched)} de {len(campañas_en_terminos)} "
+                f"campañas del reporte ({cobertura_pct:.0f}%). Las campañas sin KW en la "
+                f"sábana no podrán calificarse."
+            )
 
     if df_terms.empty:
         st.warning("El archivo no contiene filas válidas.")
@@ -162,19 +217,36 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
     agg = search_terms_analyzer.aggregate_by_account(df_terms, threshold=threshold)
     n_alertadas = int(agg["alerta"].sum())
     n_cuentas = int(len(agg))
+    # Una cuenta se considera evaluada cuando al menos un término tuvo vocab disponible
+    agg["_evaluada"] = agg["n_terminos"] > 0
+    n_evaluadas = int(agg["_evaluada"].sum())
+    n_no_evaluadas = n_cuentas - n_evaluadas
 
     # ── Banner de alerta ────────────────────────────────────────────────────
-    if n_alertadas > 0:
+    if n_evaluadas == 0:
+        st.error(
+            f"⚠️ Ninguna de las {n_cuentas} cuentas pudo evaluarse: la sábana de KW no "
+            f"cubre las campañas del reporte de términos. Sube una sábana que incluya "
+            f"las campañas correctas."
+        )
+    elif n_alertadas > 0:
         cuentas_alertadas = agg[agg["alerta"]]["Cuenta"].tolist()
         preview = ", ".join(cuentas_alertadas[:3])
         if len(cuentas_alertadas) > 3:
             preview += f", … (+{len(cuentas_alertadas) - 3})"
         st.error(
-            f"🚨 **{n_alertadas} de {n_cuentas} cuentas** tienen calidad de términos < {threshold}%. "
+            f"🚨 **{n_alertadas} de {n_evaluadas} cuentas evaluadas** tienen calidad de términos < {threshold}%. "
             f"Revisar prioritariamente: _{preview}_."
         )
+        if n_no_evaluadas > 0:
+            st.caption(
+                f"ℹ️ {n_no_evaluadas} cuenta(s) sin evaluar (no hay KW en la sábana para sus campañas)."
+            )
     else:
-        st.success(f"✅ Todas las {n_cuentas} cuentas superan el umbral de {threshold}% de calidad.")
+        msg = f"✅ Todas las {n_evaluadas} cuentas evaluadas superan el umbral de {threshold}%."
+        if n_no_evaluadas > 0:
+            msg += f" ({n_no_evaluadas} cuenta(s) sin evaluar por falta de KW en la sábana.)"
+        st.success(msg)
 
     # ── Métricas globales ───────────────────────────────────────────────────
     df_validos = df_terms[~df_terms["_sin_keyword"]]
@@ -189,15 +261,39 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Términos analizados", f"{total_terminos:,}")
     m2.metric("Score global (ponderado)", f"{score_global:.1f}%")
-    m3.metric("Cuentas alertadas", f"{n_alertadas} / {n_cuentas}")
-    m4.metric("Sin palabra clave", f"{n_sin_kw:,}", help="Filas excluidas del cálculo por no tener palabra clave.")
+    m3.metric(
+        "Cuentas alertadas",
+        f"{n_alertadas} / {n_evaluadas}",
+        help=f"De {n_evaluadas} cuentas evaluadas, {n_alertadas} están bajo umbral. "
+             f"{n_no_evaluadas} cuenta(s) sin evaluar por falta de KW.",
+    )
+    m4.metric(
+        "Sin KW en sábana",
+        f"{n_sin_kw:,}",
+        help="Filas excluidas del cálculo porque su campaña no tiene KW en la sábana cargada.",
+    )
 
     st.divider()
 
     # ── Tabla 1: ranking de cuentas ─────────────────────────────────────────
     st.subheader("Ranking de cuentas (peores primero)")
+    solo_evaluadas = st.checkbox(
+        "Mostrar solo cuentas evaluadas",
+        value=True,
+        key="filtro_evaluadas",
+        help="Oculta cuentas cuyas campañas no tienen KW en la sábana cargada.",
+    )
     tabla_cuentas = agg.copy()
-    tabla_cuentas["alerta"] = tabla_cuentas["alerta"].map({True: "🚨", False: "✅"})
+    if solo_evaluadas:
+        tabla_cuentas = tabla_cuentas[tabla_cuentas["_evaluada"]].copy()
+
+    def _estado(row):
+        if not row["_evaluada"]:
+            return "— sin evaluar"
+        return "🚨" if row["alerta"] else "✅"
+
+    tabla_cuentas["alerta"] = tabla_cuentas.apply(_estado, axis=1)
+    tabla_cuentas = tabla_cuentas.drop(columns=["_evaluada"])
     st.dataframe(
         tabla_cuentas,
         use_container_width=True,
@@ -279,7 +375,7 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
         hide_index=True,
         column_config={
             "_score_similitud": st.column_config.ProgressColumn(
-                "Score similitud",
+                "Score cobertura",
                 min_value=0, max_value=100,
                 format="%.1f",
             ),
@@ -298,12 +394,12 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
     # ── Negativas sugeridas por sustracción de vocabulario ──────────────────
     st.subheader("🚫 Negativas sugeridas por cuenta")
     st.caption(
-        "Para cada término se restan las palabras ya cubiertas por las keywords de esa cuenta. "
+        "Para cada término se restan las palabras ya cubiertas por las keywords de **su misma campaña**. "
         "Las palabras sobrantes se sugieren como negativas en **concordancia amplia** "
         "(bloquean cualquier búsqueda que las contenga)."
     )
 
-    neg_sugeridas = search_terms_analyzer.compute_negative_suggestions(df_terms)
+    neg_sugeridas = search_terms_analyzer.compute_negative_suggestions(df_terms, campaign_vocab)
 
     if neg_sugeridas.empty:
         st.success("No se encontraron palabras sin cubrir en ninguna cuenta.")
@@ -370,9 +466,18 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
 
 # ── Si solo se cargó el reporte de términos, renderizar esa sección y salir ──
 if uploaded_file is None and search_terms_file is not None:
+    if keywords_file is None:
+        st.info(
+            "Sube también la **sábana de palabras clave** en el sidebar. "
+            "Es obligatoria para calificar cada término contra el vocabulario completo "
+            "de su campaña."
+        )
+        st.stop()
     render_search_terms_section(
         search_terms_file.getvalue(),
         search_terms_file.name,
+        keywords_file.getvalue(),
+        keywords_file.name,
         quality_threshold,
     )
     st.stop()
@@ -950,8 +1055,16 @@ with st.expander("Ver datos completos"):
 # ─── Sección de calidad de términos (si también se subió ese CSV) ────────────
 if search_terms_file is not None:
     st.divider()
-    render_search_terms_section(
-        search_terms_file.getvalue(),
-        search_terms_file.name,
-        quality_threshold,
-    )
+    if keywords_file is None:
+        st.info(
+            "Para mostrar la **calidad de términos de búsqueda**, sube también la "
+            "**sábana de palabras clave** en el sidebar."
+        )
+    else:
+        render_search_terms_section(
+            search_terms_file.getvalue(),
+            search_terms_file.name,
+            keywords_file.getvalue(),
+            keywords_file.name,
+            quality_threshold,
+        )
