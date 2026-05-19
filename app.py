@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from datetime import timedelta
 import analyzer
 import comments_store
+import search_terms_analyzer
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,21 @@ with st.sidebar:
     )
 
     st.divider()
+    st.subheader("🔎 Términos de búsqueda")
+    search_terms_file = st.file_uploader(
+        "Reporte de términos de búsqueda",
+        type=["csv"],
+        key="search_terms_upl",
+        help="Export del 'Informe de términos de búsqueda' de Google Ads.",
+    )
+    quality_threshold = st.slider(
+        "Umbral de calidad (%)",
+        50, 90, 70,
+        key="quality_thr",
+        help="Cuentas con score promedio por debajo de este umbral generan alerta.",
+    )
+
+    st.divider()
     st.subheader("Filtros")
     show_paused = st.checkbox(
         "Mostrar campañas pausadas",
@@ -87,7 +103,7 @@ with st.sidebar:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-if uploaded_file is None:
+if uploaded_file is None and search_terms_file is None:
     st.title("Detector de Anomalías – Google Ads")
     st.markdown("""
     ### Cómo usar esta herramienta
@@ -103,12 +119,262 @@ if uploaded_file is None:
     | 🟡 Sin conversiones | Cuentas sin conversiones en los últimos N días |
     | 🔵 Presupuesto no consumido | Campañas que nunca alcanzaron el umbral de presupuesto |
     | 🎯 Sugerencias de optimización | Vista proactiva: oportunidades de puja, ranking, anuncios, ROAS y calidad |
+    | 🔎 Calidad de términos de búsqueda | Score de similitud entre término y palabra clave, con alertas por cuenta |
 
     💡 Para aprovechar la pestaña **Sugerencias de optimización**, añade al export columnas adicionales como:
     Impresiones, CTR, Tasa de conv., Valor de conv., Valor conv./coste (ROAS), Estrategia de puja, CPA/ROAS objetivo,
     % impresiones perdidas (presupuesto/ranking), Eficacia del anuncio y Optimization score. La pestaña tolera columnas
     faltantes y solo deshabilita las reglas que las necesitan.
+
+    🔎 Para la pestaña **Calidad de términos de búsqueda**, exporta el "Informe de términos de búsqueda" desde Google Ads
+    (incluye las columnas `Término de búsqueda`, `Palabra clave`, `Campaña`, `Cuenta`, `Clics`, `Coste`...). Súbelo en el
+    uploader independiente del sidebar — funciona aún sin el reporte diario.
     """)
+    st.stop()
+
+
+# ─── Calidad de términos de búsqueda ─────────────────────────────────────────
+
+@st.cache_data(show_spinner="Calculando similitud de términos…")
+def load_search_terms(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    df_terms = search_terms_analyzer.load_search_terms_csv(file_bytes)
+    return search_terms_analyzer.compute_similarity(df_terms)
+
+
+def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int):
+    st.header("🔎 Calidad de términos de búsqueda")
+    st.caption(
+        "Score de similitud (0–100) entre `Término de búsqueda` y `Palabra clave`. "
+        "Las cuentas se ponderan por clics; las que estén por debajo del umbral generan alerta."
+    )
+
+    try:
+        df_terms = load_search_terms(file_bytes, filename)
+    except Exception as e:
+        st.error(f"Error al procesar el reporte de términos: {e}")
+        st.info("Asegúrate de exportar el 'Informe de términos de búsqueda' con codificación UTF-8.")
+        return
+
+    if df_terms.empty:
+        st.warning("El archivo no contiene filas válidas.")
+        return
+
+    agg = search_terms_analyzer.aggregate_by_account(df_terms, threshold=threshold)
+    n_alertadas = int(agg["alerta"].sum())
+    n_cuentas = int(len(agg))
+
+    # ── Banner de alerta ────────────────────────────────────────────────────
+    if n_alertadas > 0:
+        cuentas_alertadas = agg[agg["alerta"]]["Cuenta"].tolist()
+        preview = ", ".join(cuentas_alertadas[:3])
+        if len(cuentas_alertadas) > 3:
+            preview += f", … (+{len(cuentas_alertadas) - 3})"
+        st.error(
+            f"🚨 **{n_alertadas} de {n_cuentas} cuentas** tienen calidad de términos < {threshold}%. "
+            f"Revisar prioritariamente: _{preview}_."
+        )
+    else:
+        st.success(f"✅ Todas las {n_cuentas} cuentas superan el umbral de {threshold}% de calidad.")
+
+    # ── Métricas globales ───────────────────────────────────────────────────
+    df_validos = df_terms[~df_terms["_sin_keyword"]]
+    total_terminos = int(len(df_validos))
+    n_sin_kw = int(df_terms["_sin_keyword"].sum())
+    clics_validos = df_validos["Clics"].fillna(0) if "Clics" in df_validos else None
+    if clics_validos is not None and clics_validos.sum() > 0:
+        score_global = float((df_validos["_score_similitud"] * clics_validos).sum() / clics_validos.sum())
+    else:
+        score_global = float(df_validos["_score_similitud"].mean()) if total_terminos else 0.0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Términos analizados", f"{total_terminos:,}")
+    m2.metric("Score global (ponderado)", f"{score_global:.1f}%")
+    m3.metric("Cuentas alertadas", f"{n_alertadas} / {n_cuentas}")
+    m4.metric("Sin palabra clave", f"{n_sin_kw:,}", help="Filas excluidas del cálculo por no tener palabra clave.")
+
+    st.divider()
+
+    # ── Tabla 1: ranking de cuentas ─────────────────────────────────────────
+    st.subheader("Ranking de cuentas (peores primero)")
+    tabla_cuentas = agg.copy()
+    tabla_cuentas["alerta"] = tabla_cuentas["alerta"].map({True: "🚨", False: "✅"})
+    st.dataframe(
+        tabla_cuentas,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Cuenta": st.column_config.TextColumn("Cuenta", width="large"),
+            "score_promedio": st.column_config.ProgressColumn(
+                "Score promedio",
+                min_value=0, max_value=100,
+                format="%.1f",
+            ),
+            "n_terminos": st.column_config.NumberColumn("Términos", format="%d"),
+            "n_terminos_baja_calidad": st.column_config.NumberColumn(
+                f"Bajo umbral ({threshold}%)", format="%d",
+            ),
+            "n_sin_keyword": st.column_config.NumberColumn("Sin keyword", format="%d"),
+            "total_clics": st.column_config.NumberColumn("Clics", format="%.0f"),
+            "total_coste": st.column_config.NumberColumn("Coste", format="%.2f"),
+            "alerta": st.column_config.TextColumn("Alerta", width="small"),
+        },
+    )
+
+    # ── Gráfico Plotly ──────────────────────────────────────────────────────
+    if not agg["score_promedio"].isna().all():
+        fig = go.Figure()
+        plot_df = agg.dropna(subset=["score_promedio"]).copy()
+        colors = ["#ef4444" if a else "#10b981" for a in plot_df["alerta"]]
+        fig.add_trace(go.Bar(
+            x=plot_df["score_promedio"],
+            y=plot_df["Cuenta"],
+            orientation="h",
+            marker_color=colors,
+            text=[f"{s:.1f}%" for s in plot_df["score_promedio"]],
+            textposition="outside",
+            hovertemplate="<b>%{y}</b><br>Score: %{x:.1f}%<extra></extra>",
+        ))
+        fig.add_vline(x=threshold, line_dash="dash", line_color="#6366f1",
+                      annotation_text=f"Umbral {threshold}%", annotation_position="top")
+        fig.update_layout(
+            height=max(300, 22 * len(plot_df) + 80),
+            xaxis_title="Score promedio (%)",
+            yaxis_title=None,
+            yaxis=dict(autorange="reversed"),
+            margin=dict(l=10, r=40, t=30, b=10),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # ── Tabla 2: detalle por término ────────────────────────────────────────
+    st.subheader("Detalle por término")
+    cuentas_disponibles = sorted(df_terms["Cuenta"].dropna().unique().tolist())
+    # Default: cuenta con peor score
+    default_idx = 0
+    if not agg.empty and pd.notna(agg.iloc[0]["score_promedio"]):
+        peor = agg.iloc[0]["Cuenta"]
+        if peor in cuentas_disponibles:
+            default_idx = cuentas_disponibles.index(peor)
+
+    sel_cuenta = st.selectbox(
+        "Filtrar por cuenta",
+        cuentas_disponibles,
+        index=default_idx,
+        key="search_terms_cuenta",
+    )
+
+    detalle = df_terms[df_terms["Cuenta"] == sel_cuenta].copy()
+    detalle = detalle[~detalle["_sin_keyword"]]
+    detalle = detalle.sort_values("_score_similitud", ascending=True, na_position="last")
+
+    cols_detalle = ["Término de búsqueda", "Palabra clave", "Campaña",
+                    "Tipo de concordancia", "Clics", "Coste", "Conversiones",
+                    "_score_similitud"]
+    cols_existentes = [c for c in cols_detalle if c in detalle.columns]
+    st.dataframe(
+        detalle[cols_existentes],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "_score_similitud": st.column_config.ProgressColumn(
+                "Score similitud",
+                min_value=0, max_value=100,
+                format="%.1f",
+            ),
+            "Clics": st.column_config.NumberColumn("Clics", format="%.0f"),
+            "Coste": st.column_config.NumberColumn("Coste", format="%.2f"),
+            "Conversiones": st.column_config.NumberColumn("Conversiones", format="%.2f"),
+        },
+    )
+
+    sin_kw_cuenta = int(df_terms[(df_terms["Cuenta"] == sel_cuenta) & df_terms["_sin_keyword"]].shape[0])
+    if sin_kw_cuenta > 0:
+        st.caption(f"ℹ️ {sin_kw_cuenta} fila(s) sin palabra clave excluidas del detalle.")
+
+    st.divider()
+
+    # ── Negativas sugeridas por sustracción de vocabulario ──────────────────
+    st.subheader("🚫 Negativas sugeridas por cuenta")
+    st.caption(
+        "Para cada término se restan las palabras ya cubiertas por las keywords de esa cuenta. "
+        "Las palabras sobrantes se sugieren como negativas en **concordancia amplia** "
+        "(bloquean cualquier búsqueda que las contenga)."
+    )
+
+    neg_sugeridas = search_terms_analyzer.compute_negative_suggestions(df_terms)
+
+    if neg_sugeridas.empty:
+        st.success("No se encontraron palabras sin cubrir en ninguna cuenta.")
+    else:
+        resumen_neg = (
+            neg_sugeridas.groupby("Cuenta")
+            .agg(
+                n_terminos=("Término de búsqueda", "nunique"),
+                total_coste=("Coste", lambda x: x.fillna(0).sum()),
+            )
+            .reset_index()
+            .sort_values("n_terminos", ascending=False)
+        )
+        st.caption(f"{len(resumen_neg)} cuenta(s) con términos que contienen palabras no cubiertas por sus keywords.")
+
+        for _, row in resumen_neg.iterrows():
+            cuenta_neg = row["Cuenta"]
+            n_neg = int(row["n_terminos"])
+            total_coste_neg = float(row["total_coste"])
+
+            label = f"{cuenta_neg}  —  {n_neg} término(s) con palabras no cubiertas"
+            if total_coste_neg > 0:
+                label += f"  ·  Coste acumulado: ${total_coste_neg:,.0f}"
+
+            expanded = cuenta_neg == sel_cuenta
+            with st.expander(label, expanded=expanded):
+                cuenta_neg_data = neg_sugeridas[neg_sugeridas["Cuenta"] == cuenta_neg].copy()
+
+                st.dataframe(
+                    cuenta_neg_data[[
+                        "Término de búsqueda", "palabras_no_cubiertas",
+                        "Palabra clave", "Campaña",
+                        "Clics", "Coste", "Conversiones",
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "palabras_no_cubiertas": st.column_config.TextColumn(
+                            "Palabras no cubiertas",
+                            help="Palabras del término que no aparecen en ninguna keyword de esta cuenta.",
+                            width="medium",
+                        ),
+                        "Clics": st.column_config.NumberColumn("Clics", format="%.0f"),
+                        "Coste": st.column_config.NumberColumn("Coste", format="%.2f"),
+                        "Conversiones": st.column_config.NumberColumn("Conv.", format="%.2f"),
+                    },
+                )
+
+                # Bloque copiable: palabras sueltas no cubiertas, en concordancia amplia
+                palabras_sueltas = set()
+                for entrada in cuenta_neg_data["palabras_no_cubiertas"].dropna():
+                    for p in str(entrada).split(" | "):
+                        p = p.strip()
+                        if p:
+                            palabras_sueltas.add(p)
+
+                negativas_texto = "\n".join(sorted(palabras_sueltas))
+                st.caption(
+                    f"Copiar como negativas en **concordancia amplia** "
+                    f"({len(palabras_sueltas)} palabra(s) únicas):"
+                )
+                st.code(negativas_texto, language=None)
+
+
+# ── Si solo se cargó el reporte de términos, renderizar esa sección y salir ──
+if uploaded_file is None and search_terms_file is not None:
+    render_search_terms_section(
+        search_terms_file.getvalue(),
+        search_terms_file.name,
+        quality_threshold,
+    )
     st.stop()
 
 
@@ -679,3 +945,13 @@ with st.expander("Ver datos completos"):
     st.dataframe(df.drop(columns=["_estado", "_activa"], errors="ignore"), use_container_width=True)
     csv_export = df.drop(columns=["_estado", "_activa"], errors="ignore").to_csv(index=False).encode("utf-8")
     st.download_button("Descargar datos procesados (CSV)", csv_export, "datos_procesados.csv", "text/csv")
+
+
+# ─── Sección de calidad de términos (si también se subió ese CSV) ────────────
+if search_terms_file is not None:
+    st.divider()
+    render_search_terms_section(
+        search_terms_file.getvalue(),
+        search_terms_file.name,
+        quality_threshold,
+    )
