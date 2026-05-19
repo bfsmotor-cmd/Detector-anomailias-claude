@@ -293,6 +293,69 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
     if sin_kw_cuenta > 0:
         st.caption(f"ℹ️ {sin_kw_cuenta} fila(s) sin palabra clave excluidas del detalle.")
 
+    st.divider()
+
+    # ── Negativas sugeridas por cuenta ──────────────────────────────────────
+    st.subheader("🚫 Negativas sugeridas por cuenta")
+    st.caption(
+        "Términos con score de similitud < 50 agrupados por cuenta. "
+        "Formato exacto `[término]` listo para copiar y pegar en Google Ads."
+    )
+
+    neg_df = df_terms[
+        (~df_terms["_sin_keyword"]) & (df_terms["_score_similitud"] < 50)
+    ].copy()
+
+    cuentas_con_negativas = (
+        neg_df.groupby("Cuenta")["Término de búsqueda"]
+        .nunique()
+        .reset_index(name="n_negativas")
+        .sort_values("n_negativas", ascending=False)
+    )
+
+    if cuentas_con_negativas.empty:
+        st.success("No hay términos con score < 50% en ninguna cuenta.")
+    else:
+        st.caption(f"{len(cuentas_con_negativas)} cuenta(s) con negativas sugeridas.")
+        for _, row in cuentas_con_negativas.iterrows():
+            cuenta_neg = row["Cuenta"]
+            n_neg = int(row["n_negativas"])
+            cuenta_data = neg_df[neg_df["Cuenta"] == cuenta_neg].copy()
+            total_coste_neg = float(cuenta_data["Coste"].fillna(0).sum()) if "Coste" in cuenta_data else 0.0
+
+            label = f"{cuenta_neg}  —  {n_neg} negativa(s) sugeridas"
+            if total_coste_neg > 0:
+                label += f"  ·  Coste acumulado: ${total_coste_neg:,.0f}"
+
+            expanded = cuenta_neg == sel_cuenta
+            with st.expander(label, expanded=expanded):
+                # Tabla de detalle de negativas
+                cols_neg = ["Término de búsqueda", "Palabra clave", "Campaña",
+                            "Clics", "Coste", "Conversiones", "_score_similitud"]
+                cols_neg_ok = [c for c in cols_neg if c in cuenta_data.columns]
+                cuenta_data_sorted = cuenta_data.sort_values("_score_similitud", ascending=True)
+                st.dataframe(
+                    cuenta_data_sorted[cols_neg_ok].drop_duplicates(subset=["Término de búsqueda"]),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "_score_similitud": st.column_config.ProgressColumn(
+                            "Score", min_value=0, max_value=100, format="%.1f",
+                        ),
+                        "Clics": st.column_config.NumberColumn("Clics", format="%.0f"),
+                        "Coste": st.column_config.NumberColumn("Coste", format="%.2f"),
+                        "Conversiones": st.column_config.NumberColumn("Conv.", format="%.2f"),
+                    },
+                )
+
+                # Bloque copiable en formato exacto [término]
+                terminos_unicos = sorted(
+                    cuenta_data["Término de búsqueda"].dropna().unique().tolist()
+                )
+                negativas_texto = "\n".join(f"[{t}]" for t in terminos_unicos)
+                st.caption("Copiar como negativas exactas:")
+                st.code(negativas_texto, language=None)
+
 
 # ── Si solo se cargó el reporte de términos, renderizar esa sección y salir ──
 if uploaded_file is None and search_terms_file is not None:
