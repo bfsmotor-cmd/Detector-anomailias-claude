@@ -299,7 +299,8 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
     st.subheader("🚫 Negativas sugeridas por cuenta")
     st.caption(
         "Para cada término se restan las palabras ya cubiertas por las keywords de esa cuenta. "
-        "Las palabras sobrantes son las candidatas a negativa exacta `[término]`."
+        "Las palabras sobrantes se sugieren como negativas en **concordancia amplia** "
+        "(bloquean cualquier búsqueda que las contenga)."
     )
 
     neg_sugeridas = search_terms_analyzer.compute_negative_suggestions(df_terms)
@@ -351,12 +352,19 @@ def render_search_terms_section(file_bytes: bytes, filename: str, threshold: int
                     },
                 )
 
-                # Bloque copiable: el término completo como negativa exacta
-                terminos_unicos = sorted(
-                    cuenta_neg_data["Término de búsqueda"].dropna().unique().tolist()
+                # Bloque copiable: palabras sueltas no cubiertas, en concordancia amplia
+                palabras_sueltas = set()
+                for entrada in cuenta_neg_data["palabras_no_cubiertas"].dropna():
+                    for p in str(entrada).split(" | "):
+                        p = p.strip()
+                        if p:
+                            palabras_sueltas.add(p)
+
+                negativas_texto = "\n".join(sorted(palabras_sueltas))
+                st.caption(
+                    f"Copiar como negativas en **concordancia amplia** "
+                    f"({len(palabras_sueltas)} palabra(s) únicas):"
                 )
-                negativas_texto = "\n".join(f"[{t}]" for t in terminos_unicos)
-                st.caption("Copiar como negativas exactas (términos completos):")
                 st.code(negativas_texto, language=None)
 
 
