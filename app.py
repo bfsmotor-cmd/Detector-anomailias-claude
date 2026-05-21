@@ -35,6 +35,45 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ─── Auto-cerrar sidebar al hacer click en el panel principal ─────────────────
+st.components.v1.html(
+    """
+    <script>
+    (function () {
+      const root = window.parent.document;
+      const attach = () => {
+        const main = root.querySelector('section.main')
+                  || root.querySelector('[data-testid="stMain"]')
+                  || root.querySelector('[data-testid="stAppViewContainer"] .main');
+        if (!main) { return setTimeout(attach, 300); }
+        if (main.dataset.autoCloseSidebarAttached === "1") return;
+        main.dataset.autoCloseSidebarAttached = "1";
+
+        main.addEventListener('click', (e) => {
+          const sidebar = root.querySelector('section[data-testid="stSidebar"]');
+          if (!sidebar) return;
+          // Sidebar visible si tiene ancho > 50px (colapsada queda ~0).
+          if (sidebar.offsetWidth < 50) return;
+          // No cerrar si el click vino desde dentro del sidebar.
+          if (sidebar.contains(e.target)) return;
+
+          const btn = sidebar.querySelector('button[data-testid="stBaseButton-headerNoPadding"]')
+                   || sidebar.querySelector('button[kind="headerNoPadding"]')
+                   || sidebar.querySelector('button[data-testid="stSidebarCollapseButton"]')
+                   || sidebar.querySelector('[data-testid="baseButton-headerNoPadding"]')
+                   || sidebar.querySelector('button[kind="header"]')
+                   || sidebar.querySelector('button[aria-label*="Collapse" i]')
+                   || sidebar.querySelector('button[aria-label*="ocultar" i]');
+          if (btn) btn.click();
+        }, true);
+      };
+      attach();
+    })();
+    </script>
+    """,
+    height=0,
+)
+
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -638,60 +677,145 @@ with tab0:
         ]
         filtered_audit = filtered_audit[[c for c in col_order if c in filtered_audit.columns]]
 
-        edited = st.data_editor(
-            filtered_audit,
-            column_config={
-                "Score": st.column_config.ProgressColumn(
-                    "Score", min_value=0, max_value=156, format="%d",
-                    width="small", pinned=True,
-                ),
-                "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
-                "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
-                "Reglas activas": st.column_config.TextColumn(width="large", disabled=True),
-                "Clicks hoy": st.column_config.NumberColumn(disabled=True, width="small"),
-                "Clicks ayer": st.column_config.NumberColumn(disabled=True, width="small"),
-                "Tasa conv. 7d": st.column_config.NumberColumn(
-                    "Tasa conv. 7d", format="%.1f%%", disabled=True,
-                ),
-                "Consumo presupuesto 7d": st.column_config.NumberColumn(
-                    "Consumo ppto. 7d", format="%.1f%%", disabled=True,
-                ),
-                "Estado": st.column_config.TextColumn(disabled=True),
-                "Motivo del estado": st.column_config.TextColumn(disabled=True, width="medium"),
-                "Revisada": st.column_config.CheckboxColumn("Revisada", default=False),
-                "Comentarios": st.column_config.TextColumn(
-                    "Comentarios",
-                    help="Notas personales. Se guardan en disco y se sincronizan por Cuenta+Campaña al subir nuevos CSV.",
-                    width="large",
-                    max_chars=500,
-                ),
-            },
-            hide_index=True,
-            use_container_width=True,
-            height=min(600, 60 + len(filtered_audit) * 38),
-            key="audit_editor",
+        st.info(
+            "✏️ Marca **Revisada** o edita **Comentarios** y luego haz clic en "
+            "**💾 Guardar cambios** (arriba a la derecha). Los cambios no se "
+            "persisten hasta presionar el botón.",
+            icon="ℹ️",
         )
 
-        # Detectar cambios contra lo almacenado y persistir
-        cambios = []
-        for _, row in edited.iterrows():
-            prev_rev, prev_com = comments_store.hydrate(row["Cuenta"], row["Campaña"])
-            new_rev = bool(row["Revisada"])
-            new_com = (row.get("Comentarios") or "").strip()
-            if new_rev != prev_rev or new_com != prev_com:
-                cambios.append({
-                    "cuenta": row["Cuenta"],
-                    "campana": row["Campaña"],
-                    "revisada": new_rev,
-                    "comentario": new_com,
-                })
+        # Sticky 'Guardar cambios' arriba a la derecha (junto al menú de Streamlit).
+        # Verde = todo guardado. Rojo = hay cambios pendientes (detectado por JS).
+        st.markdown(
+            """
+            <style>
+              div[data-testid="stFormSubmitButton"],
+              div[data-testid="stForm"] div[data-testid="stFormSubmitButton"] {
+                position: fixed !important;
+                top: 3.25rem !important;
+                right: 1rem !important;
+                z-index: 1000000 !important;
+                width: auto !important;
+                margin: 0 !important;
+              }
+              div[data-testid="stFormSubmitButton"] button {
+                width: auto !important;
+                padding: 0.4rem 1.1rem !important;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+                border-radius: 8px !important;
+                background: linear-gradient(180deg, #16a34a, #15803d) !important;
+                border-color: #15803d !important;
+                color: #ffffff !important;
+                transition: background 0.15s ease, border-color 0.15s ease;
+              }
+              div[data-testid="stFormSubmitButton"] button.is-dirty {
+                background: linear-gradient(180deg, #ef4444, #dc2626) !important;
+                border-color: #b91c1c !important;
+                animation: pulse-dirty 1.4s ease-in-out infinite;
+              }
+              @keyframes pulse-dirty {
+                0%, 100% { box-shadow: 0 4px 12px rgba(220,38,38,0.35); }
+                50%      { box-shadow: 0 4px 18px rgba(220,38,38,0.75); }
+              }
+              /* Bajar un poco el contenido para que el botón sticky no tape la primera línea */
+              section.main > div.block-container {
+                padding-top: 4.5rem !important;
+              }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        if cambios:
-            comments_store.sync_bulk(cambios)
-            st.toast(f"💾 {len(cambios)} cambio(s) guardado(s)", icon="✅")
+        with st.form("audit_form", clear_on_submit=False):
+            edited = st.data_editor(
+                filtered_audit,
+                column_config={
+                    "Score": st.column_config.ProgressColumn(
+                        "Score", min_value=0, max_value=156, format="%d",
+                        width="small", pinned=True,
+                    ),
+                    "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
+                    "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
+                    "Reglas activas": st.column_config.TextColumn(width="large", disabled=True),
+                    "Clicks hoy": st.column_config.NumberColumn(disabled=True, width="small"),
+                    "Clicks ayer": st.column_config.NumberColumn(disabled=True, width="small"),
+                    "Tasa conv. 7d": st.column_config.NumberColumn(
+                        "Tasa conv. 7d", format="%.1f%%", disabled=True,
+                    ),
+                    "Consumo presupuesto 7d": st.column_config.NumberColumn(
+                        "Consumo ppto. 7d", format="%.1f%%", disabled=True,
+                    ),
+                    "Estado": st.column_config.TextColumn(disabled=True),
+                    "Motivo del estado": st.column_config.TextColumn(disabled=True, width="medium"),
+                    "Revisada": st.column_config.CheckboxColumn("Revisada", default=False),
+                    "Comentarios": st.column_config.TextColumn(
+                        "Comentarios",
+                        help="Notas personales. Se guardan al presionar 'Guardar cambios'.",
+                        width="large",
+                        max_chars=500,
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=min(600, 60 + len(filtered_audit) * 38),
+                key="audit_editor",
+            )
+
+            submitted = st.form_submit_button(
+                "💾 Guardar cambios", type="primary",
+            )
+
+        # JS: marca el botón como 'is-dirty' (rojo) cuando hay ediciones pendientes.
+        # Al hacer submit, Streamlit re-renderiza y el botón vuelve a verde.
+        st.components.v1.html(
+            """
+            <script>
+            (function () {
+              const root = window.parent.document;
+              const attach = () => {
+                const form = root.querySelector('div[data-testid="stForm"]');
+                const btn  = root.querySelector('div[data-testid="stFormSubmitButton"] button');
+                if (!form || !btn) { return setTimeout(attach, 250); }
+                if (form.dataset.dirtyWatchAttached === "1") return;
+                form.dataset.dirtyWatchAttached = "1";
+                const markDirty = (e) => {
+                  // Ignorar clicks sobre el propio botón de submit
+                  if (e.target && (e.target === btn || btn.contains(e.target))) return;
+                  btn.classList.add('is-dirty');
+                };
+                ['click', 'keydown', 'input', 'change'].forEach((ev) =>
+                  form.addEventListener(ev, markDirty, true)
+                );
+              };
+              attach();
+            })();
+            </script>
+            """,
+            height=0,
+        )
+
+        if submitted:
+            cambios = []
+            for _, row in edited.iterrows():
+                prev_rev, prev_com = comments_store.hydrate(row["Cuenta"], row["Campaña"])
+                new_rev = bool(row["Revisada"])
+                new_com = (row.get("Comentarios") or "").strip()
+                if new_rev != prev_rev or new_com != prev_com:
+                    cambios.append({
+                        "cuenta": row["Cuenta"],
+                        "campana": row["Campaña"],
+                        "revisada": new_rev,
+                        "comentario": new_com,
+                    })
+
+            if cambios:
+                comments_store.sync_bulk(cambios)
+                st.success(f"💾 {len(cambios)} cambio(s) guardado(s) correctamente.", icon="✅")
+            else:
+                st.info("No hay cambios pendientes que guardar.", icon="ℹ️")
 
         # Botones de acción
-        c_dl, c_clr, c_info = st.columns([1, 1, 2])
+        c_dl, c_reset, c_clr, c_info = st.columns([1, 1, 1, 1])
         with c_dl:
             csv_audit = edited.to_csv(index=False).encode("utf-8")
             st.download_button(
@@ -701,11 +825,58 @@ with tab0:
                 "text/csv",
                 use_container_width=True,
             )
-        with c_clr:
-            if st.button("🗑️ Limpiar todo el historial", use_container_width=True):
-                comments_store.save_all({})
-                st.toast("Historial borrado", icon="🗑️")
+        with c_reset:
+            if st.button(
+                "🔄 Reiniciar revisadas",
+                use_container_width=True,
+                help="Desmarca todas las casillas 'Revisada' para iniciar la auditoría del día. Los comentarios se conservan.",
+            ):
+                afectadas = comments_store.reset_revisadas()
+                st.toast(
+                    f"🔄 {afectadas} revisada(s) reiniciada(s). Comentarios conservados.",
+                    icon="✅",
+                )
                 st.rerun()
+        with c_clr:
+            CONFIRM_PHRASE = "limpiar todo el historial"
+
+            @st.dialog("⚠️ Confirmar borrado total del historial")
+            def _confirm_clear_dialog():
+                total = len(comments_store.load_all())
+                st.error(
+                    f"Estás a punto de eliminar **{total} entrada(s)** "
+                    "del historial: revisadas **y** comentarios. "
+                    "Esta acción **no se puede deshacer**.",
+                    icon="🚨",
+                )
+                st.caption(
+                    f"Para confirmar, escribe exactamente: **{CONFIRM_PHRASE}**"
+                )
+                typed = st.text_input(
+                    "Confirmación",
+                    key="clear_confirm_input",
+                    placeholder=CONFIRM_PHRASE,
+                    label_visibility="collapsed",
+                )
+                ok = typed.strip().lower() == CONFIRM_PHRASE
+                bc1, bc2 = st.columns(2)
+                with bc1:
+                    if st.button("Cancelar", use_container_width=True, key="clear_cancel"):
+                        st.rerun()
+                with bc2:
+                    if st.button(
+                        "🗑️ Borrar todo",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=not ok,
+                        key="clear_confirm",
+                    ):
+                        comments_store.save_all({})
+                        st.toast("Historial borrado completamente", icon="🗑️")
+                        st.rerun()
+
+            if st.button("🗑️ Limpiar todo el historial", use_container_width=True):
+                _confirm_clear_dialog()
         with c_info:
             total_persisted = len(comments_store.load_all())
             st.caption(f"💾 {total_persisted} entrada(s) guardadas en `.audit_state.json`")

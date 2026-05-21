@@ -54,6 +54,31 @@ def set_entry(cuenta: str, campana: str, revisada: bool, comentario: str) -> Non
     save_all(data)
 
 
+def reset_revisadas() -> int:
+    """Desmarca todas las casillas 'revisada' pero conserva los comentarios.
+
+    - Entradas con comentario: revisada → False, comentario intacto.
+    - Entradas sin comentario y revisada=True: se eliminan (no aportan estado).
+
+    Devuelve el número de entradas afectadas.
+    """
+    data = load_all()
+    now = datetime.now().isoformat(timespec="seconds")
+    afectadas = 0
+    for k in list(data.keys()):
+        entry = data[k]
+        if not entry.get("revisada"):
+            continue
+        afectadas += 1
+        if (entry.get("comentario") or "").strip():
+            entry["revisada"] = False
+            entry["ultima_actualizacion"] = now
+        else:
+            data.pop(k, None)
+    save_all(data)
+    return afectadas
+
+
 def sync_bulk(rows: list) -> None:
     """Recibe lista de dicts con cuenta/campana/revisada/comentario y guarda todo."""
     data = load_all()
