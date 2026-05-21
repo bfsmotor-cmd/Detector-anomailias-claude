@@ -1239,31 +1239,48 @@ with tab7:
         window_days=opt_window_days,
     )
 
-    st_terms_scored = None
+    # Términos de búsqueda: el reporte basta para listar top términos.
+    # La sábana de palabras clave solo se necesita para calcular el score de calidad.
+    st_terms_df = None
     st_terms_agg = None
-    if search_terms_file is not None and keywords_file is not None:
+    if search_terms_file is not None:
         try:
-            st_terms_raw = load_search_terms_raw(
+            st_terms_df = load_search_terms_raw(
                 search_terms_file.getvalue(), search_terms_file.name
             )
-            kw_vocab = load_keywords_vocab(
-                keywords_file.getvalue(), keywords_file.name
-            )
-            st_terms_scored = search_terms_analyzer.compute_coverage_score(
-                st_terms_raw, kw_vocab
-            )
-            st_terms_agg = search_terms_analyzer.aggregate_by_account(
-                st_terms_scored, threshold=quality_threshold
-            )
+            if keywords_file is not None:
+                kw_vocab = load_keywords_vocab(
+                    keywords_file.getvalue(), keywords_file.name
+                )
+                st_terms_df = search_terms_analyzer.compute_coverage_score(
+                    st_terms_df, kw_vocab
+                )
+                st_terms_agg = search_terms_analyzer.aggregate_by_account(
+                    st_terms_df, threshold=quality_threshold
+                )
         except Exception as e:
             st.warning(f"No se pudieron cargar términos de búsqueda para enriquecer mensajes: {e}")
+            st_terms_df = None
+            st_terms_agg = None
 
     summaries = client_report.compute_account_summary(
         df,
-        search_terms_df=st_terms_scored,
+        search_terms_df=st_terms_df,
         search_terms_agg=st_terms_agg,
         suggestions_df=sug_for_report,
     )
+
+    # Avisos sobre datos opcionales que enriquecen el mensaje
+    if search_terms_file is None:
+        st.info(
+            "💡 Sube el **Informe de términos de búsqueda** en el sidebar para incluir "
+            "los 5 términos con más clics en cada mensaje."
+        )
+    elif keywords_file is None:
+        st.info(
+            "💡 Los mensajes incluirán los 5 términos con más clics. Sube también la "
+            "**sábana de palabras clave** para agregar el score de calidad de términos."
+        )
 
     if not summaries:
         st.info("No hay datos suficientes para generar mensajes de seguimiento.")
