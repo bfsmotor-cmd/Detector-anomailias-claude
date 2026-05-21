@@ -324,37 +324,37 @@ def _frase_comparativa(actual: dict, anterior: dict, deltas: dict) -> str:
 
 
 def _frase_terminos(top_terminos: list, score: Optional[float]) -> str:
+    """Bloque de los top 5 términos como lista con clics, más una línea de calidad.
+
+    Retorna el bloque sin separadores externos. Vacío si no hay datos.
+    """
     if not top_terminos:
         return ""
-    nombres = [t["termino"] for t in top_terminos[:4]]
-    listado = ", ".join(f"\"{n}\"" for n in nombres)
+    bullets = "\n".join(
+        f"• \"{t['termino']}\" — {_fmt_num(t['clics'])} clics"
+        for t in top_terminos[:5]
+    )
     if score is not None and score >= 70:
-        return (
-            f"Los términos por los que más te están encontrando son {listado}, "
-            f"todos muy alineados con tu negocio (calidad de {score:.0f}/100). "
+        cierre = (
+            f"\n\nTodos estos términos están muy alineados con tu negocio "
+            f"(calidad de {score:.0f}/100), lo que confirma que tu inversión "
+            f"está llegando a búsquedas relevantes."
         )
-    if score is not None and score >= 50:
-        return (
-            f"Los términos con más tracción esta semana fueron {listado}. "
-            f"La calidad de búsqueda está en {score:.0f}/100, con margen de mejora. "
+    elif score is not None and score >= 50:
+        cierre = (
+            f"\n\nLa calidad de los términos está en {score:.0f}/100 — un nivel "
+            f"aceptable con margen de mejora en el que estamos trabajando."
         )
-    if score is not None:
-        return (
-            f"Los términos que generaron más clics fueron {listado}. "
-            f"Estamos trabajando en refinar las palabras clave para que el tráfico sea aún más relevante. "
+    elif score is not None:
+        cierre = (
+            f"\n\nLa calidad de los términos es de {score:.0f}/100, por lo que "
+            f"estamos refinando las palabras clave para que el tráfico sea aún más relevante."
         )
-    return f"Los términos con más tracción esta semana fueron {listado}. "
-
-
-def _frase_top_campana(top_campanas: list) -> str:
-    if not top_campanas:
-        return ""
-    primera = top_campanas[0]
+    else:
+        cierre = ""
     return (
-        f"La campaña que más volumen movió fue \"{primera['campana']}\" "
-        f"con {_fmt_num(primera['clics'])} clics"
-        + (f" y {_fmt_num(primera['conv'])} conversiones." if primera['conv'] > 0 else ".")
-        + " "
+        f"Estos son los 5 términos por los que más te están encontrando esta semana:\n\n"
+        f"{bullets}{cierre}"
     )
 
 
@@ -365,29 +365,39 @@ def _bullets_sugerencias(sugerencias: list, n: int = 3) -> str:
     return "\n".join(items)
 
 
+def _join_parrafos(parrafos: list) -> str:
+    """Une párrafos no vacíos con doble salto. Garantiza saltos limpios sin
+    importar qué secciones opcionales estén presentes."""
+    return "\n\n".join(p.strip() for p in parrafos if p and p.strip())
+
+
 def _template_positivo(s: dict) -> str:
     act = s["periodo_actual"]
     comparativa = _frase_comparativa(act, s["periodo_anterior"], s["deltas"])
     terminos = _frase_terminos(s["top_terminos"], s["score_terminos"])
-    top_camp = _frase_top_campana(s["top_campanas"])
 
-    cierre_cpa = ""
     cpa_delta = s["deltas"].get("cpa_pct")
-    if cpa_delta is not None and cpa_delta <= -5:
-        cierre_cpa = f"Además, el costo por conversión mejoró un {abs(cpa_delta):.0f}% frente a la semana anterior. "
+    extra_cpa = (
+        f" Además, el costo por conversión mejoró un {abs(cpa_delta):.0f}% "
+        f"frente a la semana anterior."
+        if cpa_delta is not None and cpa_delta <= -5 else ""
+    )
 
-    return (
-        f"Hola,\n\n"
-        f"Te compartimos el resumen semanal de tu cuenta {s['cuenta']}.\n\n"
+    resumen = (
         f"Esta semana generamos un total de {_fmt_num(act['clics'])} clics y "
         f"{_fmt_num(act['conversiones'])} conversiones{comparativa}, "
-        f"con una tasa de conversión del {_fmt_pct(act['tasa_conv'])} — un resultado muy positivo. "
-        f"{cierre_cpa}"
-        f"{top_camp}"
-        f"{terminos}\n"
-        f"Seguimos optimizando día a día para sostener este desempeño y buscar nuevas oportunidades de crecimiento.\n\n"
-        f"Cualquier consulta quedamos atentos."
+        f"con una tasa de conversión del {_fmt_pct(act['tasa_conv'])} — un resultado muy positivo."
+        f"{extra_cpa}"
     )
+
+    return _join_parrafos([
+        "Hola,",
+        f"Te compartimos el resumen semanal de tu cuenta {s['cuenta']}.",
+        resumen,
+        terminos,
+        "Seguimos optimizando día a día para sostener este desempeño y buscar nuevas oportunidades de crecimiento.",
+        "Cualquier consulta quedamos atentos.",
+    ])
 
 
 def _template_mixto(s: dict) -> str:
@@ -396,65 +406,74 @@ def _template_mixto(s: dict) -> str:
     terminos = _frase_terminos(s["top_terminos"], s["score_terminos"])
     bullets = _bullets_sugerencias(s["sugerencias_top"], n=2)
 
-    # Resalta lo bueno si hay algo
     destaca = ""
     if s["deltas"].get("ctr_pct") and s["deltas"]["ctr_pct"] > 5:
-        destaca = f"Un dato positivo: el CTR mejoró un {s['deltas']['ctr_pct']:.0f}% respecto a la semana anterior, lo que indica que los anuncios están conectando mejor. "
+        destaca = (
+            f" Un dato positivo: el CTR mejoró un {s['deltas']['ctr_pct']:.0f}% "
+            f"respecto a la semana anterior, lo que indica que los anuncios están conectando mejor."
+        )
     elif act["tasa_conv"] and act["tasa_conv"] >= 5:
-        destaca = f"La tasa de conversión se mantiene en {_fmt_pct(act['tasa_conv'])}, en un rango saludable. "
+        destaca = (
+            f" La tasa de conversión se mantiene en {_fmt_pct(act['tasa_conv'])}, "
+            f"en un rango saludable."
+        )
+
+    resumen = (
+        f"Esta semana generamos {_fmt_num(act['clics'])} clics y "
+        f"{_fmt_num(act['conversiones'])} conversiones{comparativa}.{destaca}"
+    )
 
     bloque_sug = ""
     if bullets:
         bloque_sug = (
-            f"\nHemos identificado algunas oportunidades en las que ya estamos trabajando:\n\n"
-            f"{bullets}\n"
+            f"Hemos identificado algunas oportunidades en las que ya estamos trabajando:\n\n"
+            f"{bullets}"
         )
 
-    return (
-        f"Hola,\n\n"
-        f"Te compartimos el resumen semanal de tu cuenta {s['cuenta']}.\n\n"
-        f"Esta semana generamos {_fmt_num(act['clics'])} clics y "
-        f"{_fmt_num(act['conversiones'])} conversiones{comparativa}. "
-        f"{destaca}"
-        f"{terminos}"
-        f"{bloque_sug}\n"
-        f"Esperamos reflejar el impacto de estos ajustes en los próximos días.\n\n"
-        f"Cualquier consulta quedamos atentos."
-    )
+    return _join_parrafos([
+        "Hola,",
+        f"Te compartimos el resumen semanal de tu cuenta {s['cuenta']}.",
+        resumen,
+        terminos,
+        bloque_sug,
+        "Esperamos reflejar el impacto de estos ajustes en los próximos días.",
+        "Cualquier consulta quedamos atentos.",
+    ])
 
 
 def _template_mejora(s: dict) -> str:
     act = s["periodo_actual"]
     comparativa = _frase_comparativa(act, s["periodo_anterior"], s["deltas"])
+    terminos = _frase_terminos(s["top_terminos"], s["score_terminos"])
     bullets = _bullets_sugerencias(s["sugerencias_top"], n=3)
 
-    intro_conv = ""
     if act["conversiones"] == 0:
-        intro_conv = (
-            f"Esta semana la campaña generó {_fmt_num(act['clics'])} clics pero aún no concretamos conversiones"
-            f"{comparativa}. "
+        resumen = (
+            f"Esta semana la campaña generó {_fmt_num(act['clics'])} clics pero aún no concretamos "
+            f"conversiones{comparativa}."
         )
     else:
-        intro_conv = (
+        resumen = (
             f"Esta semana generamos {_fmt_num(act['clics'])} clics y "
-            f"{_fmt_num(act['conversiones'])} conversiones{comparativa}. "
+            f"{_fmt_num(act['conversiones'])} conversiones{comparativa}."
         )
 
     bloque_sug = (
-        f"Por eso revisamos a fondo el rendimiento e identificamos oportunidades concretas en las que ya estamos trabajando:\n\n"
-        f"{bullets}\n"
+        f"Por eso revisamos a fondo el rendimiento e identificamos oportunidades concretas "
+        f"en las que ya estamos trabajando:\n\n{bullets}"
         if bullets
-        else "Estamos revisando a fondo la cuenta para identificar las palancas que más rápido pueden mover los resultados.\n"
+        else "Estamos revisando a fondo la cuenta para identificar las palancas que más rápido pueden mover los resultados."
     )
 
-    return (
-        f"Hola,\n\n"
-        f"Te compartimos el resumen semanal de tu cuenta {s['cuenta']}.\n\n"
-        f"{intro_conv}\n"
-        f"{bloque_sug}\n"
-        f"Esperamos ver el impacto positivo en los próximos 7 días. Te mantendremos al tanto del progreso.\n\n"
-        f"Cualquier consulta quedamos atentos."
-    )
+    return _join_parrafos([
+        "Hola,",
+        f"Te compartimos el resumen semanal de tu cuenta {s['cuenta']}.",
+        resumen,
+        terminos,
+        bloque_sug,
+        "Esperamos ver el impacto positivo en los próximos 7 días. Te mantendremos al tanto del progreso.",
+        "Cualquier consulta quedamos atentos.",
+    ])
 
 
 def build_message(summary: dict) -> str:
