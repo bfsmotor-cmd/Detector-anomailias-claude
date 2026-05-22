@@ -33,6 +33,28 @@ st.markdown("""
     margin-bottom: 4px;
 }
 .stAlert { border-radius: 8px; }
+
+/* ── Casillas marcadas → check verde brillante ─────────────────────────
+   Aplica al checkbox del data_editor (columna 'Revisada') y a los demás
+   checkboxes de la app. 'accent-color' es el estándar moderno y solo
+   funciona si Streamlit renderiza la casilla como <input> real (no canvas). */
+input[type="checkbox"]:checked {
+    accent-color: #16a34a !important;
+}
+[data-testid="stDataFrame"] input[type="checkbox"]:checked,
+[data-testid="stDataEditor"] input[type="checkbox"]:checked,
+.stDataFrame input[type="checkbox"]:checked,
+.stDataEditor input[type="checkbox"]:checked {
+    accent-color: #16a34a !important;
+}
+/* Glide Data Grid (canvas-based) usa primaryColor del theme para el check.
+   Si el override anterior no aplica, esta variable CSS local del editor
+   sí puede sobreescribir el accent que dibuja en canvas. */
+[data-testid="stDataEditor"],
+[data-testid="stDataFrame"] {
+    --gdg-accent-color: #16a34a;
+    --gdg-accent-light: rgba(22, 163, 74, 0.20);
+}
 </style>
 """, unsafe_allow_html=True)
 
