@@ -767,8 +767,13 @@ with tab0:
                 "💾 Guardar cambios", type="primary",
             )
 
-        # JS: marca el botón como 'is-dirty' (rojo) cuando hay ediciones pendientes.
-        # Al hacer submit, Streamlit re-renderiza y el botón vuelve a verde.
+        # JS:
+        # 1) Marca el botón como 'is-dirty' (rojo) cuando hay ediciones pendientes.
+        #    Al hacer submit, Streamlit re-renderiza y el botón vuelve a verde.
+        # 2) En 'pointerdown' del botón submit, fuerza blur del elemento activo
+        #    (la celda del data_editor en edición). Sin esto, si el usuario está
+        #    escribiendo en una celda y hace click en Guardar, ese último valor
+        #    NO alcanza a commitearse al backend y se pierde tras el rerun.
         st.components.v1.html(
             """
             <script>
@@ -780,14 +785,26 @@ with tab0:
                 if (!form || !btn) { return setTimeout(attach, 250); }
                 if (form.dataset.dirtyWatchAttached === "1") return;
                 form.dataset.dirtyWatchAttached = "1";
+
+                // 1) Dirty tracking
                 const markDirty = (e) => {
-                  // Ignorar clicks sobre el propio botón de submit
                   if (e.target && (e.target === btn || btn.contains(e.target))) return;
                   btn.classList.add('is-dirty');
                 };
                 ['click', 'keydown', 'input', 'change'].forEach((ev) =>
                   form.addEventListener(ev, markDirty, true)
                 );
+
+                // 2) Commit del valor en edición antes del submit.
+                //    'pointerdown' ocurre ANTES de 'click', dando tiempo a Streamlit
+                //    a registrar el nuevo valor de la celda en edición.
+                btn.addEventListener('pointerdown', () => {
+                  const active = root.activeElement;
+                  if (active && active !== btn && !btn.contains(active) &&
+                      typeof active.blur === 'function') {
+                    active.blur();
+                  }
+                }, true);
               };
               attach();
             })();
