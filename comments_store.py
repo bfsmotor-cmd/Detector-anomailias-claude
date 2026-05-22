@@ -106,6 +106,80 @@ def hydrate(cuenta: str, campana: str) -> tuple[bool, str]:
     return bool(entry.get("revisada", False)), entry.get("comentario", "")
 
 
+def import_from_audit_csv(file_bytes: bytes) -> dict:
+    """Importa un CSV de auditoría exportado previamente y fusiona los
+    estados 'Revisada' + 'Comentarios' con el store local.
+
+    Pensado para sincronizar entre equipos: un colaborador descarga el CSV
+    de auditoría, lo comparte, y otro lo carga en su instancia para tener
+    los mismos comentarios y campañas revisadas.
+
+    Política de merge:
+    - Si la fila tiene revisada=True o comentario no vacío, se importa
+      (sobreescribe lo que haya local).
+    - Si tiene ambos vacíos, se ignora (no borra entradas existentes).
+    - Los nombres se hacen match exacto por (Cuenta, Campaña).
+
+    Devuelve dict con estadísticas: {importadas, filas_totales}.
+    Lanza ValueError si el CSV no tiene las columnas requeridas.
+    """
+    import io
+    import pandas as pd
+
+    text = file_bytes.decode("utf-8-sig", errors="replace")
+    df = pd.read_csv(io.StringIO(text))
+
+    required = {"Cuenta", "Campaña"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"El CSV no tiene columnas requeridas: {', '.join(sorted(missing))}. "
+            f"¿Es un CSV de auditoría exportado desde este dashboard?"
+        )
+
+    has_revisada = "Revisada" in df.columns
+    has_comentarios = "Comentarios" in df.columns
+    if not has_revisada and not has_comentarios:
+        raise ValueError(
+            "El CSV no tiene ni la columna 'Revisada' ni 'Comentarios'. Nada para importar."
+        )
+
+    truthy = {"true", "1", "yes", "sí", "si", "x", "verdadero"}
+    rows = []
+    for _, r in df.iterrows():
+        cuenta = str(r["Cuenta"]).strip() if pd.notna(r["Cuenta"]) else ""
+        campana = str(r["Campaña"]).strip() if pd.notna(r["Campaña"]) else ""
+        if not cuenta or not campana:
+            continue
+
+        rev = False
+        if has_revisada:
+            val = r["Revisada"]
+            if pd.notna(val):
+                rev = str(val).strip().lower() in truthy
+
+        com = ""
+        if has_comentarios:
+            val = r["Comentarios"]
+            if pd.notna(val):
+                com = str(val).strip()
+
+        if not rev and not com:
+            continue
+
+        rows.append({
+            "cuenta": cuenta,
+            "campana": campana,
+            "revisada": rev,
+            "comentario": com,
+        })
+
+    if rows:
+        sync_bulk(rows)
+
+    return {"importadas": len(rows), "filas_totales": int(len(df))}
+
+
 # ─── Sugerencias de optimización ─────────────────────────────────────────────
 # Clave: 'Cuenta||Campaña||Categoría' — varias sugerencias por campaña.
 

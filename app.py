@@ -883,6 +883,50 @@ with tab0:
             total_persisted = len(comments_store.load_all())
             st.caption(f"💾 {total_persisted} entrada(s) guardadas en `.audit_state.json`")
 
+        # ── Importar auditoría (sincronizar entre equipos) ───────────────────
+        with st.expander("📤 Importar auditoría desde CSV (sincronizar entre equipos)"):
+            st.caption(
+                "Carga aquí un CSV de auditoría descargado previamente desde otro "
+                "equipo para fusionar sus campañas revisadas y comentarios con tu "
+                "estado local. Solo se importan filas con `Revisada=True` o con "
+                "comentario; las demás se ignoran."
+            )
+            import_file = st.file_uploader(
+                "Archivo de auditoría (.csv)",
+                type=["csv"],
+                key="audit_import_upl",
+                help="Debe ser un CSV exportado con el botón 'Descargar auditoría' de este mismo dashboard.",
+            )
+            ic1, ic2 = st.columns([1, 3])
+            with ic1:
+                do_import = st.button(
+                    "📥 Importar",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=import_file is None,
+                    key="audit_do_import",
+                )
+            if do_import and import_file is not None:
+                try:
+                    stats = comments_store.import_from_audit_csv(import_file.getvalue())
+                    if stats["importadas"] > 0:
+                        st.success(
+                            f"✅ {stats['importadas']} entrada(s) importada(s) de "
+                            f"{stats['filas_totales']} filas en el archivo. "
+                            f"Los cambios ya están en `.audit_state.json`.",
+                            icon="✅",
+                        )
+                        st.rerun()
+                    else:
+                        st.info(
+                            "El CSV no tenía filas con `Revisada=True` ni comentarios. "
+                            "Nada para importar."
+                        )
+                except ValueError as e:
+                    st.error(f"❌ {e}")
+                except Exception as e:
+                    st.error(f"❌ Error al procesar el CSV: {e}")
+
 # ── Tab 1: Sin movimiento HOY ─────────────────────────────────────────────────
 with tab1:
     st.subheader(f"Campañas activas sin movimiento — {latest_date.strftime('%d/%m/%Y')}")
