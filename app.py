@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import timedelta
 import analyzer
+import client_report
 import comments_store
 import search_terms_analyzer
 
@@ -32,6 +33,28 @@ st.markdown("""
     margin-bottom: 4px;
 }
 .stAlert { border-radius: 8px; }
+
+/* ── Casillas marcadas → check verde brillante ─────────────────────────
+   Aplica al checkbox del data_editor (columna 'Revisada') y a los demás
+   checkboxes de la app. 'accent-color' es el estándar moderno y solo
+   funciona si Streamlit renderiza la casilla como <input> real (no canvas). */
+input[type="checkbox"]:checked {
+    accent-color: #16a34a !important;
+}
+[data-testid="stDataFrame"] input[type="checkbox"]:checked,
+[data-testid="stDataEditor"] input[type="checkbox"]:checked,
+.stDataFrame input[type="checkbox"]:checked,
+.stDataEditor input[type="checkbox"]:checked {
+    accent-color: #16a34a !important;
+}
+/* Glide Data Grid (canvas-based) usa primaryColor del theme para el check.
+   Si el override anterior no aplica, esta variable CSS local del editor
+   sí puede sobreescribir el accent que dibuja en canvas. */
+[data-testid="stDataEditor"],
+[data-testid="stDataFrame"] {
+    --gdg-accent-color: #16a34a;
+    --gdg-accent-light: rgba(22, 163, 74, 0.20);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -604,7 +627,7 @@ st.divider()
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🚨 Auditoría diaria",
     "🔴 Sin movimiento hoy",
     "🟠 Sin movimiento ayer",
@@ -612,6 +635,7 @@ tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔵 Presupuesto no consumido",
     "📊 Ranking de campañas",
     "🎯 Sugerencias de optimización",
+    "📨 Seguimiento semanal",
 ])
 
 # ── Tab 0: Auditoría diaria consolidada ──────────────────────────────────────
@@ -765,8 +789,13 @@ with tab0:
                 "💾 Guardar cambios", type="primary",
             )
 
-        # JS: marca el botón como 'is-dirty' (rojo) cuando hay ediciones pendientes.
-        # Al hacer submit, Streamlit re-renderiza y el botón vuelve a verde.
+        # JS:
+        # 1) Marca el botón como 'is-dirty' (rojo) cuando hay ediciones pendientes.
+        #    Al hacer submit, Streamlit re-renderiza y el botón vuelve a verde.
+        # 2) En 'pointerdown' del botón submit, fuerza blur del elemento activo
+        #    (la celda del data_editor en edición). Sin esto, si el usuario está
+        #    escribiendo en una celda y hace click en Guardar, ese último valor
+        #    NO alcanza a commitearse al backend y se pierde tras el rerun.
         st.components.v1.html(
             """
             <script>
@@ -778,14 +807,26 @@ with tab0:
                 if (!form || !btn) { return setTimeout(attach, 250); }
                 if (form.dataset.dirtyWatchAttached === "1") return;
                 form.dataset.dirtyWatchAttached = "1";
+
+                // 1) Dirty tracking
                 const markDirty = (e) => {
-                  // Ignorar clicks sobre el propio botón de submit
                   if (e.target && (e.target === btn || btn.contains(e.target))) return;
                   btn.classList.add('is-dirty');
                 };
                 ['click', 'keydown', 'input', 'change'].forEach((ev) =>
                   form.addEventListener(ev, markDirty, true)
                 );
+
+                // 2) Commit del valor en edición antes del submit.
+                //    'pointerdown' ocurre ANTES de 'click', dando tiempo a Streamlit
+                //    a registrar el nuevo valor de la celda en edición.
+                btn.addEventListener('pointerdown', () => {
+                  const active = root.activeElement;
+                  if (active && active !== btn && !btn.contains(active) &&
+                      typeof active.blur === 'function') {
+                    active.blur();
+                  }
+                }, true);
               };
               attach();
             })();
@@ -880,6 +921,50 @@ with tab0:
         with c_info:
             total_persisted = len(comments_store.load_all())
             st.caption(f"💾 {total_persisted} entrada(s) guardadas en `.audit_state.json`")
+
+        # ── Importar auditoría (sincronizar entre equipos) ───────────────────
+        with st.expander("📤 Importar auditoría desde CSV (sincronizar entre equipos)"):
+            st.caption(
+                "Carga aquí un CSV de auditoría descargado previamente desde otro "
+                "equipo para fusionar sus campañas revisadas y comentarios con tu "
+                "estado local. Solo se importan filas con `Revisada=True` o con "
+                "comentario; las demás se ignoran."
+            )
+            import_file = st.file_uploader(
+                "Archivo de auditoría (.csv)",
+                type=["csv"],
+                key="audit_import_upl",
+                help="Debe ser un CSV exportado con el botón 'Descargar auditoría' de este mismo dashboard.",
+            )
+            ic1, ic2 = st.columns([1, 3])
+            with ic1:
+                do_import = st.button(
+                    "📥 Importar",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=import_file is None,
+                    key="audit_do_import",
+                )
+            if do_import and import_file is not None:
+                try:
+                    stats = comments_store.import_from_audit_csv(import_file.getvalue())
+                    if stats["importadas"] > 0:
+                        st.success(
+                            f"✅ {stats['importadas']} entrada(s) importada(s) de "
+                            f"{stats['filas_totales']} filas en el archivo. "
+                            f"Los cambios ya están en `.audit_state.json`.",
+                            icon="✅",
+                        )
+                        st.rerun()
+                    else:
+                        st.info(
+                            "El CSV no tenía filas con `Revisada=True` ni comentarios. "
+                            "Nada para importar."
+                        )
+                except ValueError as e:
+                    st.error(f"❌ {e}")
+                except Exception as e:
+                    st.error(f"❌ Error al procesar el CSV: {e}")
 
 # ── Tab 1: Sin movimiento HOY ─────────────────────────────────────────────────
 with tab1:
@@ -1213,6 +1298,184 @@ with tab6:
         with d2:
             total_p = len(comments_store.load_suggestions_state())
             st.caption(f"💾 {total_p} sugerencia(s) con estado guardado en `.suggestions_state.json`")
+
+
+# ── Tab 7: Seguimiento semanal por cliente ───────────────────────────────────
+with tab7:
+    st.subheader("Mensaje de seguimiento semanal por cliente")
+    st.caption(
+        "Genera un mensaje narrativo personalizado para cada cuenta basado en los KPIs "
+        "de los últimos 7 días, comparativa vs. la semana anterior, top términos de búsqueda "
+        "y las principales oportunidades de optimización. Listo para copiar y enviar."
+    )
+
+    # Preparar insumos: sugerencias y, si están cargados, términos de búsqueda
+    sug_for_report, _ = analyzer.compute_optimization_suggestions(
+        df,
+        thresholds={
+            "lost_is_budget_high": float(opt_lost_budget),
+            "lost_is_rank_high": float(opt_lost_rank),
+            "min_clicks_no_conv": int(opt_min_clicks_no_conv),
+            "ctr_min_search": float(opt_ctr_search),
+            "roas_min": float(opt_roas_min),
+        },
+        window_days=opt_window_days,
+    )
+
+    # Términos de búsqueda: el reporte basta para listar top términos.
+    # La sábana de palabras clave solo se necesita para calcular el score de calidad.
+    st_terms_df = None
+    st_terms_agg = None
+    if search_terms_file is not None:
+        try:
+            st_terms_df = load_search_terms_raw(
+                search_terms_file.getvalue(), search_terms_file.name
+            )
+            if keywords_file is not None:
+                kw_vocab = load_keywords_vocab(
+                    keywords_file.getvalue(), keywords_file.name
+                )
+                st_terms_df = search_terms_analyzer.compute_coverage_score(
+                    st_terms_df, kw_vocab
+                )
+                st_terms_agg = search_terms_analyzer.aggregate_by_account(
+                    st_terms_df, threshold=quality_threshold
+                )
+        except Exception as e:
+            st.warning(f"No se pudieron cargar términos de búsqueda para enriquecer mensajes: {e}")
+            st_terms_df = None
+            st_terms_agg = None
+
+    summaries = client_report.compute_account_summary(
+        df,
+        search_terms_df=st_terms_df,
+        search_terms_agg=st_terms_agg,
+        suggestions_df=sug_for_report,
+    )
+
+    # Avisos sobre datos opcionales que enriquecen el mensaje
+    if search_terms_file is None:
+        st.info(
+            "💡 Sube el **Informe de términos de búsqueda** en el sidebar para incluir "
+            "los 5 términos con más clics en cada mensaje."
+        )
+    elif keywords_file is None:
+        st.info(
+            "💡 Los mensajes incluirán los 5 términos con más clics. Sube también la "
+            "**sábana de palabras clave** para agregar el score de calidad de términos."
+        )
+
+    if not summaries:
+        st.info("No hay datos suficientes para generar mensajes de seguimiento.")
+    else:
+        # KPIs por tono
+        tonos = pd.Series([s["tono"] for s in summaries])
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Cuentas", len(summaries))
+        k2.metric("✅ Positivos", int((tonos == "positivo").sum()))
+        k3.metric("⚠️ Mixtos", int((tonos == "mixto").sum()))
+        k4.metric("🔧 En mejora", int((tonos == "mejora").sum()))
+
+        if not summaries[0]["tiene_periodo_anterior"]:
+            st.info(
+                "ℹ️ El CSV solo tiene una semana de datos: los mensajes no incluirán "
+                "comparativa vs. semana anterior. Sube datos de 14 días para enriquecerlos."
+            )
+
+        # Filtros
+        f1, f2 = st.columns([2, 1])
+        with f1:
+            cuentas_disponibles = sorted([s["cuenta"] for s in summaries])
+            sel_cuentas = st.multiselect(
+                "Cuentas a mostrar",
+                cuentas_disponibles,
+                default=cuentas_disponibles,
+                key="seguimiento_cuentas",
+            )
+        with f2:
+            sel_tonos = st.multiselect(
+                "Filtrar por tono",
+                ["positivo", "mixto", "mejora"],
+                default=["positivo", "mixto", "mejora"],
+                key="seguimiento_tonos",
+            )
+
+        filtrados = [
+            s for s in summaries
+            if s["cuenta"] in sel_cuentas and s["tono"] in sel_tonos
+        ]
+
+        # Botón descargar todos
+        if filtrados:
+            todos_txt = "\n\n" + ("─" * 70) + "\n\n"
+            todos_txt = todos_txt.join(
+                f"CUENTA: {s['cuenta']}  ·  TONO: {s['tono'].upper()}\n\n{client_report.build_message(s)}"
+                for s in filtrados
+            )
+            st.download_button(
+                "📥 Descargar todos los mensajes (.txt)",
+                todos_txt.encode("utf-8"),
+                f"seguimientos_{summaries[0]['fecha_fin'].strftime('%Y%m%d')}.txt",
+                "text/plain",
+            )
+
+        st.divider()
+
+        TONO_BADGE = {
+            "positivo": ("✅", "#16a34a", "Positivo"),
+            "mixto": ("⚠️", "#ca8a04", "Mixto"),
+            "mejora": ("🔧", "#2563eb", "En mejora"),
+        }
+
+        for s in filtrados:
+            icono, color, label = TONO_BADGE.get(s["tono"], ("•", "#888", s["tono"]))
+            with st.expander(f"{icono} {s['cuenta']} — {label}", expanded=False):
+                # Mini-KPIs
+                act = s["periodo_actual"]
+                deltas = s["deltas"]
+
+                def _delta_str(pct, invertido=False):
+                    if pct is None:
+                        return None
+                    arrow = "↑" if pct > 0 else ("↓" if pct < 0 else "→")
+                    return f"{arrow} {abs(pct):.0f}% vs sem. anterior"
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric(
+                    "Clics 7d",
+                    f"{int(act['clics']):,}".replace(",", "."),
+                    _delta_str(deltas.get("clics_pct")),
+                )
+                m2.metric(
+                    "Conversiones 7d",
+                    f"{act['conversiones']:.1f}",
+                    _delta_str(deltas.get("conv_pct")),
+                )
+                m3.metric(
+                    "Tasa conv.",
+                    f"{act['tasa_conv']:.1f}%" if act['tasa_conv'] is not None else "—",
+                )
+                m4.metric(
+                    "CPA",
+                    f"${act['cpa']:,.2f}" if act['cpa'] is not None else "—",
+                    _delta_str(deltas.get("cpa_pct"), invertido=True),
+                    delta_color="inverse",
+                )
+
+                if s["score_terminos"] is not None:
+                    st.caption(
+                        f"🔎 Calidad de términos de búsqueda: **{s['score_terminos']:.0f}/100**"
+                    )
+
+                # Mensaje
+                mensaje = client_report.build_message(s)
+                st.text_area(
+                    "Mensaje generado",
+                    mensaje,
+                    height=320,
+                    key=f"msg_{s['cuenta']}",
+                    help="Selecciona el texto y cópialo, o usa el botón de descarga arriba.",
+                )
 
 
 # ─── Footer ──────────────────────────────────────────────────────────────────
