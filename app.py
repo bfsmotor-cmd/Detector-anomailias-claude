@@ -1076,7 +1076,7 @@ with tab4:
             return "background-color: #fefce8"
 
         st.dataframe(
-            underbudget.style.applymap(color_consumption, subset=["Consumo promedio (%)"]),
+            underbudget.style.map(color_consumption, subset=["Consumo promedio (%)"]),
             use_container_width=True,
             hide_index=True,
         )
