@@ -27,6 +27,15 @@ if password != APP_PASSWORD:
 
 st.markdown("""
 <style>
+/* ── Desactivar swipe horizontal de 2 dedos = atrás/adelante en macOS ──
+   overscroll-behavior-x: none evita que el navegador interprete el gesto
+   de swipe horizontal como navegación, mejorando la usabilidad dentro de
+   tablas y elementos con scroll horizontal. */
+html, body, [data-testid="stAppViewContainer"], .main, .block-container {
+    overscroll-behavior-x: none;
+    overscroll-behavior-y: auto;
+}
+
 .metric-card {
     background: #1e1e2e;
     border-radius: 12px;
