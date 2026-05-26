@@ -17,6 +17,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─── Autenticación básica ────────────────────────────────────────────────────
+APP_PASSWORD = st.secrets["APP_PASSWORD"]
+password = st.text_input("Ingresa la contraseña", type="password")
+if password != APP_PASSWORD:
+    st.stop()
+
 # ─── Estilos ──────────────────────────────────────────────────────────────────
 
 st.markdown("""
