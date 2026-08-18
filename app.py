@@ -45,16 +45,36 @@ class _StoredFile:
 
 def _resolve_shared_file(local_file, kind: str, label: str):
     """Si se subió un archivo esta sesión, lo guarda como el compartido del
-    equipo. Si no, recupera el último que haya subido otro miembro."""
+    equipo. Si no, recupera el último que haya subido otro miembro.
+
+    Ante un fallo de conexión con la base de datos compartida no se tumba
+    toda la app: se avisa y se sigue con el archivo local (si lo hay) o sin
+    archivo compartido, en vez de dejar un traceback sin manejar.
+    """
     if local_file is not None:
         cache_key = f"_shared_saved_{kind}"
         file_id = getattr(local_file, "file_id", local_file.name)
         if st.session_state.get(cache_key) != file_id:
-            db.save_shared_file(kind, local_file.name, local_file.getvalue())
-            st.session_state[cache_key] = file_id
+            try:
+                db.save_shared_file(kind, local_file.name, local_file.getvalue())
+                st.session_state[cache_key] = file_id
+            except Exception as e:
+                st.warning(
+                    f"⚠️ No se pudo sincronizar '{label}' con el equipo "
+                    f"(base de datos no disponible: {e}). Se usa solo en esta sesión.",
+                    icon="⚠️",
+                )
         return local_file
 
-    stored = db.load_shared_file(kind)
+    try:
+        stored = db.load_shared_file(kind)
+    except Exception as e:
+        st.warning(
+            f"⚠️ No se pudo recuperar '{label}' compartido por el equipo "
+            f"(base de datos no disponible: {e}).",
+            icon="⚠️",
+        )
+        return None
     if stored is None:
         return None
 
@@ -731,8 +751,38 @@ with tab0:
         if accounts_filter:
             filtered_audit = filtered_audit[filtered_audit["Cuenta"].isin(accounts_filter)]
 
-        # Hidratar Revisada + Comentarios desde la base de datos compartida
-        stored = comments_store.load_all()
+        # Hidratar Revisada + Comentarios desde la base de datos compartida.
+        # Si la conexión falla, reutilizamos el último snapshot bueno conocido
+        # de esta sesión en vez de tumbar toda la página con un traceback
+        # (eso perdería de vista cualquier edición pendiente de reintento).
+        def _load_audit_state_safe():
+            try:
+                data = comments_store.load_all()
+                st.session_state["_audit_state_cache"] = data
+                st.session_state["_audit_state_cache_error"] = None
+                return data
+            except Exception as e:
+                st.session_state["_audit_state_cache_error"] = str(e)
+                return st.session_state.get("_audit_state_cache")
+
+        stored = _load_audit_state_safe()
+        if stored is None:
+            st.error(
+                "❌ No se pudo conectar a la base de datos compartida "
+                f"({st.session_state.get('_audit_state_cache_error')}). "
+                "No es posible cargar la auditoría en este momento; reintenta en "
+                "unos segundos.",
+                icon="🚨",
+            )
+            st.stop()
+        if st.session_state.get("_audit_state_cache_error"):
+            st.warning(
+                "⚠️ No se pudo refrescar el estado desde la base de datos compartida "
+                "(mostrando el último snapshot conocido de esta sesión). Los cambios "
+                "que ya estaban guardados siguen a salvo; los nuevos se reintentarán "
+                "automáticamente cuando la conexión vuelva.",
+                icon="⚠️",
+            )
 
         def _stored_revisada(row):
             entry = stored.get(f"{row['Cuenta']}||{row['Campaña']}", {})
@@ -755,158 +805,105 @@ with tab0:
         filtered_audit = filtered_audit[[c for c in col_order if c in filtered_audit.columns]]
 
         st.info(
-            "✏️ Marca **Revisada** o edita **Comentarios** y luego haz clic en "
-            "**💾 Guardar cambios** (arriba a la derecha). Los cambios no se "
-            "persisten hasta presionar el botón.",
+            "✏️ Marca **Revisada** o edita **Comentarios**: cada cambio se guarda "
+            "automáticamente en la base de datos compartida apenas lo confirmas "
+            "(clic en la casilla, o Enter/clic fuera del comentario). No hace falta "
+            "presionar ningún botón de guardado, y no puedes seguir avanzando hasta "
+            "que el guardado se confirme.",
             icon="ℹ️",
         )
 
-        # Sticky 'Guardar cambios' arriba a la derecha (junto al menú de Streamlit).
-        # Verde = todo guardado. Rojo = hay cambios pendientes (detectado por JS).
-        st.markdown(
-            """
-            <style>
-              div[data-testid="stFormSubmitButton"],
-              div[data-testid="stForm"] div[data-testid="stFormSubmitButton"] {
-                position: fixed !important;
-                top: 3.25rem !important;
-                right: 1rem !important;
-                z-index: 1000000 !important;
-                width: auto !important;
-                margin: 0 !important;
-              }
-              div[data-testid="stFormSubmitButton"] button {
-                width: auto !important;
-                padding: 0.4rem 1.1rem !important;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.18);
-                border-radius: 8px !important;
-                background: linear-gradient(180deg, #16a34a, #15803d) !important;
-                border-color: #15803d !important;
-                color: #ffffff !important;
-                transition: background 0.15s ease, border-color 0.15s ease;
-              }
-              div[data-testid="stFormSubmitButton"] button.is-dirty {
-                background: linear-gradient(180deg, #ef4444, #dc2626) !important;
-                border-color: #b91c1c !important;
-                animation: pulse-dirty 1.4s ease-in-out infinite;
-              }
-              @keyframes pulse-dirty {
-                0%, 100% { box-shadow: 0 4px 12px rgba(220,38,38,0.35); }
-                50%      { box-shadow: 0 4px 18px rgba(220,38,38,0.75); }
-              }
-              /* Bajar un poco el contenido para que el botón sticky no tape la primera línea */
-              section.main > div.block-container {
-                padding-top: 4.5rem !important;
-              }
-            </style>
-            """,
-            unsafe_allow_html=True,
+        if "_audit_pending_errors" not in st.session_state:
+            st.session_state["_audit_pending_errors"] = {}
+
+        def _persist_audit_change(cuenta: str, campana: str, revisada: bool, comentario: str):
+            """Guarda una fila en Postgres de inmediato. Devuelve (ok, error)."""
+            pendientes = st.session_state["_audit_pending_errors"]
+            try:
+                comments_store.set_entry(cuenta, campana, revisada, comentario)
+                pendientes.pop((cuenta, campana), None)
+                return True, None
+            except Exception as e:
+                pendientes[(cuenta, campana)] = (revisada, comentario, str(e))
+                return False, str(e)
+
+        def _autosave_audit_edits():
+            """on_change del data_editor: persiste cada celda editada al instante,
+            sin esperar a que el usuario termine de editar toda la tabla."""
+            editor_state = st.session_state.get("audit_editor") or {}
+            edited_rows = editor_state.get("edited_rows") or {}
+            if not edited_rows:
+                return
+
+            guardadas = 0
+            for pos, changes in edited_rows.items():
+                try:
+                    row = filtered_audit.iloc[int(pos)]
+                except (IndexError, ValueError, KeyError):
+                    continue
+                cuenta, campana = row["Cuenta"], row["Campaña"]
+                new_rev = bool(changes.get("Revisada", row["Revisada"]))
+                new_com = (changes.get("Comentarios", row["Comentarios"]) or "").strip()
+                ok, _err = _persist_audit_change(cuenta, campana, new_rev, new_com)
+                if ok:
+                    guardadas += 1
+            st.session_state["_audit_last_autosave_count"] = guardadas
+
+        edited = st.data_editor(
+            filtered_audit,
+            column_config={
+                "Score": st.column_config.ProgressColumn(
+                    "Score", min_value=0, max_value=156, format="%d",
+                    width="small", pinned=True,
+                ),
+                "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
+                "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
+                "Reglas activas": st.column_config.TextColumn(width="large", disabled=True),
+                "Clicks hoy": st.column_config.NumberColumn(disabled=True, width="small"),
+                "Clicks ayer": st.column_config.NumberColumn(disabled=True, width="small"),
+                "Tasa conv. 7d": st.column_config.NumberColumn(
+                    "Tasa conv. 7d", format="%.1f%%", disabled=True,
+                ),
+                "Consumo presupuesto 7d": st.column_config.NumberColumn(
+                    "Consumo ppto. 7d", format="%.1f%%", disabled=True,
+                ),
+                "Estado": st.column_config.TextColumn(disabled=True),
+                "Motivo del estado": st.column_config.TextColumn(disabled=True, width="medium"),
+                "Revisada": st.column_config.CheckboxColumn("Revisada", default=False),
+                "Comentarios": st.column_config.TextColumn(
+                    "Comentarios",
+                    help="Notas personales. Se guardan automáticamente al salir del campo.",
+                    width="large",
+                    max_chars=500,
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=min(600, 60 + len(filtered_audit) * 38),
+            key="audit_editor",
+            on_change=_autosave_audit_edits,
         )
 
-        with st.form("audit_form", clear_on_submit=False):
-            edited = st.data_editor(
-                filtered_audit,
-                column_config={
-                    "Score": st.column_config.ProgressColumn(
-                        "Score", min_value=0, max_value=156, format="%d",
-                        width="small", pinned=True,
-                    ),
-                    "Cuenta": st.column_config.TextColumn(disabled=True, pinned=True),
-                    "Campaña": st.column_config.TextColumn(disabled=True, width="medium", pinned=True),
-                    "Reglas activas": st.column_config.TextColumn(width="large", disabled=True),
-                    "Clicks hoy": st.column_config.NumberColumn(disabled=True, width="small"),
-                    "Clicks ayer": st.column_config.NumberColumn(disabled=True, width="small"),
-                    "Tasa conv. 7d": st.column_config.NumberColumn(
-                        "Tasa conv. 7d", format="%.1f%%", disabled=True,
-                    ),
-                    "Consumo presupuesto 7d": st.column_config.NumberColumn(
-                        "Consumo ppto. 7d", format="%.1f%%", disabled=True,
-                    ),
-                    "Estado": st.column_config.TextColumn(disabled=True),
-                    "Motivo del estado": st.column_config.TextColumn(disabled=True, width="medium"),
-                    "Revisada": st.column_config.CheckboxColumn("Revisada", default=False),
-                    "Comentarios": st.column_config.TextColumn(
-                        "Comentarios",
-                        help="Notas personales. Se guardan al presionar 'Guardar cambios'.",
-                        width="large",
-                        max_chars=500,
-                    ),
-                },
-                hide_index=True,
-                use_container_width=True,
-                height=min(600, 60 + len(filtered_audit) * 38),
-                key="audit_editor",
+        pendientes = st.session_state["_audit_pending_errors"]
+        if pendientes:
+            detalle = "; ".join(
+                f"{cuenta} / {campana}: {err}"
+                for (cuenta, campana), (_rev, _com, err) in list(pendientes.items())[:3]
             )
-
-            submitted = st.form_submit_button(
-                "💾 Guardar cambios", type="primary",
+            st.error(
+                f"❌ {len(pendientes)} cambio(s) **NO guardado(s)** en la base de datos "
+                f"compartida (siguen visibles en la tabla, pero se perderían si cierras la "
+                f"sesión): {detalle}. Revisa la conexión y presiona 'Reintentar guardado'.",
+                icon="🚨",
             )
-
-        # JS:
-        # 1) Marca el botón como 'is-dirty' (rojo) cuando hay ediciones pendientes.
-        #    Al hacer submit, Streamlit re-renderiza y el botón vuelve a verde.
-        # 2) En 'pointerdown' del botón submit, fuerza blur del elemento activo
-        #    (la celda del data_editor en edición). Sin esto, si el usuario está
-        #    escribiendo en una celda y hace click en Guardar, ese último valor
-        #    NO alcanza a commitearse al backend y se pierde tras el rerun.
-        st.components.v1.html(
-            """
-            <script>
-            (function () {
-              const root = window.parent.document;
-              const attach = () => {
-                const form = root.querySelector('div[data-testid="stForm"]');
-                const btn  = root.querySelector('div[data-testid="stFormSubmitButton"] button');
-                if (!form || !btn) { return setTimeout(attach, 250); }
-                if (form.dataset.dirtyWatchAttached === "1") return;
-                form.dataset.dirtyWatchAttached = "1";
-
-                // 1) Dirty tracking
-                const markDirty = (e) => {
-                  if (e.target && (e.target === btn || btn.contains(e.target))) return;
-                  btn.classList.add('is-dirty');
-                };
-                ['click', 'keydown', 'input', 'change'].forEach((ev) =>
-                  form.addEventListener(ev, markDirty, true)
-                );
-
-                // 2) Commit del valor en edición antes del submit.
-                //    'pointerdown' ocurre ANTES de 'click', dando tiempo a Streamlit
-                //    a registrar el nuevo valor de la celda en edición.
-                btn.addEventListener('pointerdown', () => {
-                  const active = root.activeElement;
-                  if (active && active !== btn && !btn.contains(active) &&
-                      typeof active.blur === 'function') {
-                    active.blur();
-                  }
-                }, true);
-              };
-              attach();
-            })();
-            </script>
-            """,
-            height=0,
-        )
-
-        if submitted:
-            cambios = []
-            for _, row in edited.iterrows():
-                prev_rev, prev_com = comments_store.hydrate(row["Cuenta"], row["Campaña"])
-                new_rev = bool(row["Revisada"])
-                new_com = (row.get("Comentarios") or "").strip()
-                if new_rev != prev_rev or new_com != prev_com:
-                    cambios.append({
-                        "cuenta": row["Cuenta"],
-                        "campana": row["Campaña"],
-                        "revisada": new_rev,
-                        "comentario": new_com,
-                    })
-
-            if cambios:
-                comments_store.sync_bulk(cambios)
-                st.success(f"💾 {len(cambios)} cambio(s) guardado(s) correctamente.", icon="✅")
-            else:
-                st.info("No hay cambios pendientes que guardar.", icon="ℹ️")
+            if st.button("🔁 Reintentar guardado", type="primary", key="audit_retry_save"):
+                for (cuenta, campana), (rev, com, _err) in list(pendientes.items()):
+                    _persist_audit_change(cuenta, campana, rev, com)
+                st.rerun()
+        else:
+            _last_count = st.session_state.pop("_audit_last_autosave_count", 0)
+            if _last_count:
+                st.toast(f"💾 {_last_count} cambio(s) guardado(s) automáticamente.", icon="✅")
 
         # Botones de acción
         c_dl, c_reset, c_clr, c_info = st.columns([1, 1, 1, 1])
@@ -923,7 +920,12 @@ with tab0:
             if st.button(
                 "🔄 Reiniciar revisadas",
                 use_container_width=True,
-                help="Desmarca todas las casillas 'Revisada' para iniciar la auditoría del día. Los comentarios se conservan.",
+                disabled=bool(pendientes),
+                help=(
+                    "Hay cambios sin guardar: resuélvelos primero."
+                    if pendientes else
+                    "Desmarca todas las casillas 'Revisada' para iniciar la auditoría del día. Los comentarios se conservan."
+                ),
             ):
                 afectadas = comments_store.reset_revisadas()
                 st.toast(
@@ -969,11 +971,15 @@ with tab0:
                         st.toast("Historial borrado completamente", icon="🗑️")
                         st.rerun()
 
-            if st.button("🗑️ Limpiar todo el historial", use_container_width=True):
+            if st.button(
+                "🗑️ Limpiar todo el historial",
+                use_container_width=True,
+                disabled=bool(pendientes),
+                help="Hay cambios sin guardar: resuélvelos primero." if pendientes else None,
+            ):
                 _confirm_clear_dialog()
         with c_info:
-            total_persisted = len(comments_store.load_all())
-            st.caption(f"💾 {total_persisted} entrada(s) guardadas en la base de datos compartida")
+            st.caption(f"💾 {len(stored)} entrada(s) guardadas en la base de datos compartida")
 
         # ── Importar auditoría (sincronizar entre equipos) ───────────────────
         with st.expander("📤 Importar auditoría desde CSV (sincronizar entre equipos)"):
