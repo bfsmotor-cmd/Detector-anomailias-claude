@@ -6,6 +6,7 @@ from datetime import timedelta
 import analyzer
 import client_report
 import comments_store
+import db
 import search_terms_analyzer
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -22,6 +23,47 @@ APP_PASSWORD = st.secrets["APP_PASSWORD"]
 password = st.text_input("Ingresa la contraseña", type="password")
 if password != APP_PASSWORD:
     st.stop()
+
+db.init_db()
+
+
+# ─── Datos compartidos con el equipo ──────────────────────────────────────────
+
+class _StoredFile:
+    """Envoltorio con la misma interfaz mínima que UploadedFile (.read/.getvalue/.name)."""
+
+    def __init__(self, name: str, content: bytes):
+        self.name = name
+        self._content = content
+
+    def getvalue(self) -> bytes:
+        return self._content
+
+    def read(self) -> bytes:
+        return self._content
+
+
+def _resolve_shared_file(local_file, kind: str, label: str):
+    """Si se subió un archivo esta sesión, lo guarda como el compartido del
+    equipo. Si no, recupera el último que haya subido otro miembro."""
+    if local_file is not None:
+        cache_key = f"_shared_saved_{kind}"
+        file_id = getattr(local_file, "file_id", local_file.name)
+        if st.session_state.get(cache_key) != file_id:
+            db.save_shared_file(kind, local_file.name, local_file.getvalue())
+            st.session_state[cache_key] = file_id
+        return local_file
+
+    stored = db.load_shared_file(kind)
+    if stored is None:
+        return None
+
+    filename, content, uploaded_at = stored
+    st.sidebar.caption(
+        f"📊 Usando **{label}** compartido por el equipo · `{filename}` "
+        f"· subido {uploaded_at.strftime('%d/%m/%Y %H:%M')}"
+    )
+    return _StoredFile(filename, content)
 
 # ─── Estilos ──────────────────────────────────────────────────────────────────
 
@@ -175,6 +217,11 @@ with st.sidebar:
 
     st.divider()
     st.caption("v1.0 · Desarrollado con Streamlit")
+
+# Si nadie subió un archivo esta sesión, usar el último compartido por el equipo.
+uploaded_file = _resolve_shared_file(uploaded_file, "main_csv", "reporte de campañas")
+search_terms_file = _resolve_shared_file(search_terms_file, "search_terms_csv", "términos de búsqueda")
+keywords_file = _resolve_shared_file(keywords_file, "keywords_csv", "sábana de keywords")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -684,7 +731,7 @@ with tab0:
         if accounts_filter:
             filtered_audit = filtered_audit[filtered_audit["Cuenta"].isin(accounts_filter)]
 
-        # Hidratar Revisada + Comentarios desde almacenamiento local
+        # Hidratar Revisada + Comentarios desde la base de datos compartida
         stored = comments_store.load_all()
 
         def _stored_revisada(row):
@@ -926,7 +973,7 @@ with tab0:
                 _confirm_clear_dialog()
         with c_info:
             total_persisted = len(comments_store.load_all())
-            st.caption(f"💾 {total_persisted} entrada(s) guardadas en `.audit_state.json`")
+            st.caption(f"💾 {total_persisted} entrada(s) guardadas en la base de datos compartida")
 
         # ── Importar auditoría (sincronizar entre equipos) ───────────────────
         with st.expander("📤 Importar auditoría desde CSV (sincronizar entre equipos)"):
@@ -958,7 +1005,7 @@ with tab0:
                         st.success(
                             f"✅ {stats['importadas']} entrada(s) importada(s) de "
                             f"{stats['filas_totales']} filas en el archivo. "
-                            f"Los cambios ya están en `.audit_state.json`.",
+                            f"Los cambios ya están en la base de datos compartida.",
                             icon="✅",
                         )
                         st.rerun()
@@ -1303,7 +1350,7 @@ with tab6:
             )
         with d2:
             total_p = len(comments_store.load_suggestions_state())
-            st.caption(f"💾 {total_p} sugerencia(s) con estado guardado en `.suggestions_state.json`")
+            st.caption(f"💾 {total_p} sugerencia(s) con estado guardado en la base de datos compartida")
 
 
 # ── Tab 7: Seguimiento semanal por cliente ───────────────────────────────────
