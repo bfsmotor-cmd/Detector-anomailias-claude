@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -412,6 +413,10 @@ def render_search_terms_section(
 
     # ── Tabla 1: ranking de cuentas ─────────────────────────────────────────
     st.subheader("Ranking de cuentas (peores primero)")
+    st.caption(
+        "👆 Marca la **casilla a la izquierda** de una cuenta y la página salta "
+        "automáticamente al *Detalle por término* de esa cuenta."
+    )
     solo_evaluadas = st.checkbox(
         "Mostrar solo cuentas evaluadas",
         value=True,
@@ -428,11 +433,14 @@ def render_search_terms_section(
         return "🚨" if row["alerta"] else "✅"
 
     tabla_cuentas["alerta"] = tabla_cuentas.apply(_estado, axis=1)
-    tabla_cuentas = tabla_cuentas.drop(columns=["_evaluada"])
-    st.dataframe(
+    tabla_cuentas = tabla_cuentas.drop(columns=["_evaluada"]).reset_index(drop=True)
+    ranking_event = st.dataframe(
         tabla_cuentas,
         use_container_width=True,
         hide_index=True,
+        key="ranking_cuentas_tbl",
+        on_select="rerun",
+        selection_mode="single-row",
         column_config={
             "Cuenta": st.column_config.TextColumn("Cuenta", width="large"),
             "score_promedio": st.column_config.ProgressColumn(
@@ -450,6 +458,15 @@ def render_search_terms_section(
             "alerta": st.column_config.TextColumn("Alerta", width="small"),
         },
     )
+
+    # Cuenta marcada en la tabla del ranking (si la hay).
+    cuenta_tabla = None
+    try:
+        filas_sel = list(ranking_event.selection["rows"])
+    except (AttributeError, KeyError, TypeError):
+        filas_sel = []
+    if filas_sel and filas_sel[0] < len(tabla_cuentas):
+        cuenta_tabla = tabla_cuentas.iloc[filas_sel[0]]["Cuenta"]
 
     # ── Gráfico Plotly ──────────────────────────────────────────────────────
     if not agg["score_promedio"].isna().all():
@@ -477,10 +494,17 @@ def render_search_terms_section(
         )
         st.plotly_chart(fig, use_container_width=True)
 
+    # Solo se propaga la selección cuando *cambia*: así un cambio manual
+    # posterior en el selectbox de abajo no se revierte en el siguiente rerun.
+    prev_tabla = st.session_state.get("_st_prev_sel_tabla")
+    st.session_state["_st_prev_sel_tabla"] = cuenta_tabla
+
+    cuenta_clicada = cuenta_tabla if cuenta_tabla != prev_tabla else None
+
     st.divider()
 
     # ── Tabla 2: detalle por término ────────────────────────────────────────
-    st.subheader("Detalle por término")
+    st.subheader("Detalle por término", anchor="detalle-por-termino")
     cuentas_disponibles = sorted(df_terms["Cuenta"].dropna().unique().tolist())
     # Default: cuenta con peor score
     default_idx = 0
@@ -489,10 +513,27 @@ def render_search_terms_section(
         if peor in cuentas_disponibles:
             default_idx = cuentas_disponibles.index(peor)
 
+    # El valor del selectbox se controla por session_state (no por `index`), para
+    # poder empujarlo desde el clic en el ranking sin que Streamlit avise por
+    # mezclar default + Session State API.
+    if not cuentas_disponibles:
+        st.warning("No hay cuentas con términos para mostrar en el detalle.")
+        return
+
+    if (
+        "search_terms_cuenta" not in st.session_state
+        or st.session_state["search_terms_cuenta"] not in cuentas_disponibles
+    ):
+        st.session_state["search_terms_cuenta"] = cuentas_disponibles[default_idx]
+
+    hacer_scroll = False
+    if cuenta_clicada is not None and cuenta_clicada in cuentas_disponibles:
+        st.session_state["search_terms_cuenta"] = cuenta_clicada
+        hacer_scroll = True
+
     sel_cuenta = st.selectbox(
         "Filtrar por cuenta",
         cuentas_disponibles,
-        index=default_idx,
         key="search_terms_cuenta",
     )
 
@@ -523,6 +564,29 @@ def render_search_terms_section(
     sin_kw_cuenta = int(df_terms[(df_terms["Cuenta"] == sel_cuenta) & df_terms["_sin_keyword"]].shape[0])
     if sin_kw_cuenta > 0:
         st.caption(f"ℹ️ {sin_kw_cuenta} fila(s) sin palabra clave excluidas del detalle.")
+
+    # Tras un clic en el ranking, bajar la vista hasta este bloque. El script
+    # corre dentro de un iframe, así que se opera sobre `window.parent`.
+    if hacer_scroll:
+        components.html(
+            """
+            <script>
+            const bajar = () => {
+                try {
+                    const destino = window.parent.document
+                        .getElementById("detalle-por-termino");
+                    if (destino) {
+                        destino.scrollIntoView({behavior: "instant", block: "start"});
+                    }
+                } catch (e) {}
+            };
+            // Varios intentos: Streamlit restaura la posición de scroll al
+            // terminar el rerun y puede pisar el primer salto.
+            [100, 350, 700].forEach(ms => setTimeout(bajar, ms));
+            </script>
+            """,
+            height=0,
+        )
 
     st.divider()
 
