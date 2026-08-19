@@ -206,7 +206,7 @@ with st.sidebar:
     show_paused = st.checkbox(
         "Mostrar campañas pausadas",
         value=False,
-        help="Por defecto se ocultan las campañas con estado 'Pausada'. Actívalo para incluirlas en métricas y tablas.",
+        help="Por defecto se ocultan las campañas pausadas ('Pausada', 'En pausa' o 'Detenida' según el idioma de la cuenta). Actívalo para incluirlas en métricas y tablas.",
     )
 
     st.divider()
@@ -275,6 +275,10 @@ if uploaded_file is None and search_terms_file is None:
 
     Cada término se califica por el **% de palabras** que están en el vocabulario de las KW de su misma campaña.
     Funciona sin el reporte diario; solo necesita los dos uploaders independientes del sidebar.
+
+    🌎 **Idioma de la cuenta:** los exports valen tanto en español de España (`Coste`, `CPC medio`, `1.234,56`)
+    como de Latinoamérica (`Costo`, `Prom. CPC`, `1,234.56`). Los nombres de columna y el formato numérico
+    se detectan solos, así que no hace falta que todo el equipo descargue con la misma configuración.
     """)
     st.stop()
 
@@ -731,7 +735,7 @@ except Exception as e:
     st.stop()
 
 # Filtrar campañas pausadas según toggle del sidebar
-PAUSED_STATUSES = {"En pausa", "Pausada", "Paused"}
+PAUSED_STATUSES = analyzer.PAUSED_STATUSES
 if show_paused:
     df = df_full
     paused_rows = 0

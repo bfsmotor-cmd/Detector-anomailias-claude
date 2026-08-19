@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+import unicodedata
+
 import pandas as pd
 import numpy as np
 from datetime import timedelta
@@ -80,16 +83,186 @@ COLUMN_ALIASES = {
 
 ACTIVE_STATUSES = {"Habilitada", "Enabled", "Active", "Activa"}
 
+# Estados de pausa. Google Ads España exporta "En pausa"/"Pausada"; la versión
+# Latinoamérica (es-419) exporta "Detenida"/"Detenido".
+PAUSED_STATUSES = {"En pausa", "Pausada", "Paused", "Detenida", "Detenido"}
 
-def _parse_number(val):
-    """Convierte strings con formato español (1.234,56) a float.
-    Convención Google Ads ES: ',' decimal, '.' separador de miles."""
+
+# ─── Compatibilidad de nombres de columna entre locales de Google Ads ─────────
+#
+# El mismo informe descargado desde una cuenta en español de España (es-ES) y
+# desde una en español de Latinoamérica (es-419) trae encabezados distintos:
+# "Coste" vs "Costo", "CPC medio" vs "Prom. CPC", "Tasa de conv." vs
+# "Porcentaje de conv.", etc. Todo el código interno usa los nombres es-ES como
+# canónicos, así que aquí traducimos cualquier variante conocida a ese nombre.
+#
+# Para añadir un locale nuevo basta con agregar variantes a esta tabla.
+
+COLUMN_SYNONYMS = {
+    # canónico (es-ES)                 : variantes equivalentes
+    "Coste": ["Costo", "Cost"],
+    "Coste (moneda convertida)": ["Costo (moneda convertida)"],
+    "Coste/conv.": ["Costo/conv."],
+    "Coste (moneda convertida)/conv.": ["Costo (moneda convertida)/conv."],
+    "CPC medio": ["Prom. CPC", "CPC prom.", "Avg. CPC"],
+    "CPC medio (moneda convertida)": ["CPC prom. (moneda convertida)"],
+    "Clics": ["Clicks", "Interacciones"],
+    "Impresiones": ["Impressions"],
+    "Tasa de conv.": ["Porcentaje de conv.", "Porcentaje de conversiones"],
+    "Valor de conv.": ["Valor de conversión", "Valor de conv"],
+    "Valor conv./coste": ["Valor de conv./costo", "Valor de conv./coste"],
+    # Estrategia de puja
+    "Tipo de estrategia de puja": ["Tipo de estrategia de oferta"],
+    "Estrategia de puja": ["Estrategia de oferta"],
+    # Cuotas de impresiones
+    "Cuota de impr. de búsqueda": [
+        "Porcentaje de impr. de búsqueda",
+        "Porcentaje de impresiones de búsqueda",
+        "Cuota de impresiones de búsqueda",
+    ],
+    "Cuota impr. de parte sup. de búsqueda": ["% impr. parte sup. búsqueda"],
+    "Cuota impr. parte sup. absoluta de Búsqueda": [
+        "Porcentaje abs. impr. parte sup. búsqueda",
+        "Cuota de impresiones de búsqueda (parte superior abs.)",
+        "Cuota de impr. superior abs. de búsqueda",
+    ],
+    # Impresiones perdidas por presupuesto
+    "% impr. perdidas de búsq. (presup.)": [
+        "% impr. perdidas de la Búsqueda (presupuesto)",
+        "Porcentaje de impresiones de búsqueda perdidas (presupuesto)",
+    ],
+    "Cuota impr. perdidas de parte sup. de búsqueda (presupuesto)": [
+        "% impr. perdidas parte sup. búsqueda (presupuesto)",
+    ],
+    "Cuota impr. perdidas de parte sup. abs. de búsqueda (presupuesto)": [
+        "% absoluto impr. perdidas parte sup. búsqueda (presupuesto)",
+    ],
+    # Impresiones perdidas por ranking / clasificación
+    "Cuota impr. perd. de búsq. (ranking)": [
+        "% impr. perdidas de la Búsqueda (ranking)",
+        "Porcentaje de impresiones de búsqueda perdidas (rank)",
+        "Porcentaje de impresiones de búsqueda perdidas (ranking)",
+    ],
+    "Cuota impr. perdidas de parte sup. de búsqueda (ranking)": [
+        "% impr. perdidas parte sup. búsqueda (clasificación)",
+    ],
+    "Cuota impr. perdidas de parte sup. abs. de búsqueda (ranking)": [
+        "% absoluto impr. perdidas parte sup. búsqueda (clasificación)",
+    ],
+    # Calidad del anuncio
+    "Eficacia del anuncio": [
+        "Detalles de la eficacia de los anuncios",
+        "Detalles de la calidad del anuncio",
+    ],
+    "Nivel de optimización": ["Optimization score"],  # la comparación ignora may/min
+}
+
+
+def _norm_header(name) -> str:
+    """Clave de comparación de encabezados: sin acentos, sin puntuación,
+    sin espacios (incluidos los no separables que mete Google Ads) y en
+    minúsculas."""
+    s = str(name).replace("\xa0", " ")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+# {clave normalizada de la variante: nombre canónico}
+_CANONICAL_BY_NORM = {
+    _norm_header(variant): canonical
+    for canonical, variants in COLUMN_SYNONYMS.items()
+    for variant in variants
+}
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Renombra columnas de cualquier locale soportado al nombre canónico es-ES.
+
+    Nunca pisa una columna canónica ya presente: si el CSV trae `Clics` y
+    `Interacciones` (informe de palabras clave es-419, donde son métricas
+    distintas), `Clics` gana y `Interacciones` se deja intacta.
+    """
+    taken = {_norm_header(c) for c in df.columns}
+    rename = {}
+    for col in df.columns:
+        canonical = _CANONICAL_BY_NORM.get(_norm_header(col))
+        if canonical is None or canonical == col:
+            continue
+        if _norm_header(canonical) in taken:
+            continue
+        rename[col] = canonical
+        taken.add(_norm_header(canonical))
+    return df.rename(columns=rename) if rename else df
+
+
+# ─── Formato numérico ────────────────────────────────────────────────────────
+#
+# es-ES exporta "1.234,56" (coma decimal) y es-419 exporta "1,234.56" (punto
+# decimal). Se detecta por archivo en vez de asumir uno de los dos.
+
+_NUMERIC_LIKE = re.compile(r"^[-+]?[\d.,]+%?$")
+
+
+def detect_decimal_sep(values, default: str = ",") -> str:
+    """Deduce el separador decimal (',' o '.') de una muestra de valores."""
+    both_comma = both_dot = 0
+    comma_dec = dot_dec = 0
+
+    for val in values:
+        if val is None:
+            continue
+        s = str(val).strip().replace("\xa0", "").replace(" ", "")
+        if not s or not _NUMERIC_LIKE.match(s):
+            continue
+        s = s.rstrip("%").lstrip("+-")
+        if not any(c.isdigit() for c in s):
+            continue
+
+        has_comma, has_dot = "," in s, "." in s
+        if has_comma and has_dot:
+            # El separador más a la derecha es el decimal: "1.234,56" / "1,234.56"
+            if s.rfind(",") > s.rfind("."):
+                both_comma += 1
+            else:
+                both_dot += 1
+        elif has_comma:
+            # Un grupo final que no tenga 3 dígitos no puede ser de miles
+            if len(s.rsplit(",", 1)[1]) != 3:
+                comma_dec += 1
+        elif has_dot:
+            if len(s.rsplit(".", 1)[1]) != 3:
+                dot_dec += 1
+
+    if both_comma or both_dot:
+        return "," if both_comma >= both_dot else "."
+    if comma_dec or dot_dec:
+        return "," if comma_dec >= dot_dec else "."
+    return default
+
+
+def sniff_decimal_sep(df: pd.DataFrame, cols, sample: int = 500) -> str:
+    """Detecta el separador decimal mirando las columnas numéricas del df."""
+    values = []
+    for col in cols:
+        if col in df.columns:
+            values.extend(df[col].dropna().astype(str).head(sample).tolist())
+    return detect_decimal_sep(values)
+
+
+def _parse_number(val, decimal_sep: str = ","):
+    """Convierte a float un número exportado por Google Ads.
+
+    `decimal_sep=','` → formato es-ES (1.234,56); `'.'` → es-419 (1,234.56).
+    """
     if pd.isna(val):
         return np.nan
     s = str(val).strip().replace("\xa0", "").replace(" ", "")
     if s in ("", "-", "--", "—"):
         return np.nan
-    if "," in s and "." in s:
+    if decimal_sep == ".":
+        s = s.replace(",", "")
+    elif "," in s and "." in s:
         s = s.replace(".", "").replace(",", ".")
     elif "," in s:
         s = s.replace(",", ".")
@@ -102,19 +275,22 @@ def _parse_number(val):
         return np.nan
 
 
-def _parse_percent(val):
-    """Convierte '23,45%', '23,45', '< 10%' a float (0–100). NaN si no parseable."""
+def _parse_percent(val, decimal_sep: str = ","):
+    """Convierte '23,45%', '23.45%', '< 10%' a float (0–100). NaN si no parseable."""
     if pd.isna(val):
         return np.nan
     s = str(val).strip().replace("\xa0", "").replace(" ", "")
     if s in ("", "-", "--", "—"):
         return np.nan
     s = s.lstrip("<>").replace("%", "")
-    return _parse_number(s)
+    return _parse_number(s, decimal_sep)
 
 
 def load_and_clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
+    # Traducir encabezados de otros locales (es-419) a los nombres canónicos
+    df = normalize_columns(df)
 
     # Normalizar nombre de la columna de fecha
     date_col = next((c for c in df.columns if c.strip().lower() in ("día", "dia", "date", "fecha")), None)
@@ -129,15 +305,18 @@ def load_and_clean(df: pd.DataFrame) -> pd.DataFrame:
     if df["Día"].isna().all():
         raise ValueError("No se pudo parsear la columna de fecha. Verifica el formato.")
 
+    # Detectar el formato numérico del export (es-ES "1.234,56" vs es-419 "1,234.56")
+    dec = sniff_decimal_sep(df, NUMERIC_COLS + PERCENT_COLS)
+
     # Limpiar columnas numéricas
     for col in NUMERIC_COLS:
         if col in df.columns:
-            df[col] = df[col].apply(_parse_number)
+            df[col] = df[col].apply(_parse_number, decimal_sep=dec)
 
     # Limpiar columnas de porcentaje
     for col in PERCENT_COLS:
         if col in df.columns:
-            df[col] = df[col].apply(_parse_percent)
+            df[col] = df[col].apply(_parse_percent, decimal_sep=dec)
 
     # Crear alias internos canónicos para acceso uniforme
     for original, alias in COLUMN_ALIASES.items():
