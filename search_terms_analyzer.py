@@ -77,8 +77,10 @@ def load_search_terms_csv(file_bytes: bytes) -> pd.DataFrame:
         dtype=str,
     )
 
-    # Limpiar nombres de columnas
+    # Limpiar nombres de columnas y traducir variantes de otros locales
+    # (es-419 usa "Costo", "Interacciones", "Porcentaje de conv.", …)
     df_raw.columns = [c.strip() for c in df_raw.columns]
+    df_raw = analyzer.normalize_columns(df_raw)
 
     # Validar columnas mínimas
     required = {"Término de búsqueda", "Palabra clave"}
@@ -86,7 +88,8 @@ def load_search_terms_csv(file_bytes: bytes) -> pd.DataFrame:
     if missing:
         raise ValueError(
             f"Faltan columnas requeridas en el CSV: {', '.join(sorted(missing))}. "
-            f"¿Es este el 'Informe de términos de búsqueda' de Google Ads?"
+            f"¿Es este el 'Informe de términos de búsqueda' de Google Ads? "
+            f"Columnas encontradas: {', '.join(df_raw.columns)}"
         )
 
     # Filtrar filas vacías y totales
@@ -98,16 +101,26 @@ def load_search_terms_csv(file_bytes: bytes) -> pd.DataFrame:
     df_raw = df_raw.dropna(how="all").reset_index(drop=True)
 
     # Parsear numéricos y porcentajes con los helpers de analyzer
+    dec = analyzer.sniff_decimal_sep(
+        df_raw, SEARCH_TERMS_NUMERIC_COLS + SEARCH_TERMS_PERCENT_COLS
+    )
+
     for col in SEARCH_TERMS_NUMERIC_COLS:
         if col in df_raw.columns:
-            df_raw[col] = df_raw[col].apply(analyzer._parse_number)
+            df_raw[col] = df_raw[col].apply(analyzer._parse_number, decimal_sep=dec)
 
     for col in SEARCH_TERMS_PERCENT_COLS:
         if col in df_raw.columns:
-            df_raw[col] = df_raw[col].apply(analyzer._parse_percent)
+            df_raw[col] = df_raw[col].apply(analyzer._parse_percent, decimal_sep=dec)
 
     if "Cuenta" not in df_raw.columns:
         df_raw["Cuenta"] = "Sin cuenta"
+
+    # Garantizar las métricas que consume el análisis: no todos los exports las
+    # traen y `aggregate_by_account` asume que existen.
+    for col in ("Clics", "Coste", "Conversiones"):
+        if col not in df_raw.columns:
+            df_raw[col] = np.nan
 
     return df_raw
 
@@ -142,13 +155,15 @@ def load_keywords_csv(file_bytes: bytes) -> pd.DataFrame:
         dtype=str,
     )
     df_raw.columns = [c.strip() for c in df_raw.columns]
+    df_raw = analyzer.normalize_columns(df_raw)
 
     required = {"Campaña", "Palabra clave"}
     missing = required - set(df_raw.columns)
     if missing:
         raise ValueError(
             f"Faltan columnas requeridas en la sábana de KW: {', '.join(sorted(missing))}. "
-            f"Se esperan al menos 'Cuenta', 'Campaña', 'Palabra clave'."
+            f"Se esperan al menos 'Cuenta', 'Campaña', 'Palabra clave'. "
+            f"Columnas encontradas: {', '.join(df_raw.columns)}"
         )
 
     if "Cuenta" not in df_raw.columns:
