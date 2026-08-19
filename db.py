@@ -39,15 +39,6 @@ def init_db() -> bool:
             )
         """))
         conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS meta_fit_state (
-                cuenta TEXT PRIMARY KEY,
-                estado TEXT NOT NULL DEFAULT 'Pendiente',
-                asignado_a TEXT NOT NULL DEFAULT '',
-                nota TEXT NOT NULL DEFAULT '',
-                ultima_actualizacion TIMESTAMP NOT NULL
-            )
-        """))
-        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS suggestions_state (
                 cuenta TEXT NOT NULL,
                 campana TEXT NOT NULL,
