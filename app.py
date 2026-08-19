@@ -19,6 +19,30 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─── Guardia contra módulos obsoletos ────────────────────────────────────────
+# Streamlit Cloud vuelve a ejecutar app.py cuando llega un push, pero mantiene
+# vivo el proceso de Python: los módulos locales ya importados se quedan en
+# sys.modules con el código anterior. Si app.py es nuevo y analyzer.py todavía
+# es el viejo, el fallo aparece como un AttributeError críptico (y censurado en
+# la nube) a mitad del análisis. Lo detectamos aquí y decimos qué hacer.
+_API_REQUERIDA = [
+    (analyzer, ("PAUSED_STATUSES", "COLUMN_SYNONYMS", "normalize_columns", "sniff_decimal_sep")),
+    (search_terms_analyzer, ("load_search_terms_csv", "compute_coverage_score")),
+]
+_faltantes = [
+    f"`{mod.__name__}.{attr}`"
+    for mod, attrs in _API_REQUERIDA
+    for attr in attrs
+    if not hasattr(mod, attr)
+]
+if _faltantes:
+    st.error(
+        "La app está corriendo con una versión desactualizada de sus módulos "
+        f"(falta {', '.join(_faltantes)}). Reiníciala desde **Manage app → "
+        "Reboot app** para que cargue el código nuevo."
+    )
+    st.stop()
+
 # ─── Autenticación básica ────────────────────────────────────────────────────
 APP_PASSWORD = st.secrets["APP_PASSWORD"]
 password = st.text_input("Ingresa la contraseña", type="password")
