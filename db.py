@@ -71,13 +71,52 @@ def save_shared_file(kind: str, filename: str, content: bytes) -> None:
         })
 
 
-def load_shared_file(kind: str) -> Optional[Tuple[str, bytes, datetime]]:
-    """Devuelve (filename, content, uploaded_at) o None si no hay nada guardado."""
+def _load_shared_file_meta(kind: str) -> Optional[Tuple[str, datetime]]:
+    """Devuelve (filename, uploaded_at) o None. Sin el BYTEA: son unos pocos bytes.
+
+    Se consulta en cada rerun para detectar al instante si otra persona subió
+    un archivo nuevo, sin pagar el coste de descargar el contenido.
+    """
     engine = get_engine()
     with engine.begin() as conn:
         row = conn.execute(text("""
-            SELECT filename, content, uploaded_at FROM shared_files WHERE kind = :kind
+            SELECT filename, uploaded_at FROM shared_files WHERE kind = :kind
         """), {"kind": kind}).fetchone()
     if row is None:
         return None
-    return row.filename, bytes(row.content), row.uploaded_at
+    return row.filename, row.uploaded_at
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _load_shared_file_content(kind: str, filename: str, uploaded_at: datetime) -> bytes:
+    """Descarga el BYTEA. Cacheado por (kind, filename, uploaded_at).
+
+    'uploaded_at' cambia con cada subida, así que la caché se invalida sola
+    cuando alguien sube un archivo nuevo, pero NO en cada rerun de Streamlit.
+    Los tres argumentos forman la clave de caché: no llevan '_' delante a
+    propósito, porque ese prefijo los excluiría del hash.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT content FROM shared_files WHERE kind = :kind
+        """), {"kind": kind}).fetchone()
+    return bytes(row.content) if row is not None else b""
+
+
+def load_shared_file(kind: str) -> Optional[Tuple[str, bytes, datetime]]:
+    """Devuelve (filename, content, uploaded_at) o None si no hay nada guardado.
+
+    Streamlit reejecuta el script entero en cada interacción, así que descargar
+    el CSV completo aquí en cada rerun disparaba el egress de la base de datos.
+    Ahora la consulta se parte en dos: metadata barata en cada rerun y contenido
+    cacheado hasta que la metadata cambie.
+    """
+    meta = _load_shared_file_meta(kind)
+    if meta is None:
+        return None
+    filename, uploaded_at = meta
+    content = _load_shared_file_content(kind, filename, uploaded_at)
+    if not content:
+        return None
+    return filename, content, uploaded_at
