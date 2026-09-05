@@ -16,8 +16,15 @@ def get_engine():
     return create_engine(st.secrets["DATABASE_URL"], pool_pre_ping=True)
 
 
+# Súbelo cada vez que se añada una tabla o columna. `init_db` está cacheada con
+# `cache_resource`, que sobrevive a los reruns y también a un push en Streamlit
+# Cloud mientras el proceso siga vivo: sin este argumento el CREATE TABLE nuevo
+# no llegaría a ejecutarse y la app fallaría contra un esquema viejo.
+SCHEMA_VERSION = 2
+
+
 @st.cache_resource
-def init_db() -> bool:
+def init_db(schema_version: int = SCHEMA_VERSION) -> bool:
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("""
@@ -36,6 +43,17 @@ def init_db() -> bool:
                 comentario TEXT NOT NULL DEFAULT '',
                 ultima_actualizacion TIMESTAMP NOT NULL,
                 PRIMARY KEY (cuenta, campana)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS search_term_notes (
+                cuenta TEXT NOT NULL,
+                campana TEXT NOT NULL,
+                termino TEXT NOT NULL,
+                veredicto TEXT NOT NULL DEFAULT '',
+                nota TEXT NOT NULL DEFAULT '',
+                ultima_actualizacion TIMESTAMP NOT NULL,
+                PRIMARY KEY (cuenta, campana, termino)
             )
         """))
         conn.execute(text("""

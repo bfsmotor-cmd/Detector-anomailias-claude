@@ -5,7 +5,7 @@ Todo el equipo lee y escribe sobre la misma base de datos, así que los cambios
 de una persona son visibles de inmediato para las demás.
 """
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 from sqlalchemy import text
 
@@ -223,6 +223,101 @@ def import_from_audit_csv(file_bytes: bytes) -> dict:
         sync_bulk(rows)
 
     return {"importadas": len(rows), "filas_totales": int(len(df))}
+
+
+# ─── Notas por término de búsqueda ───────────────────────────────────────────
+# Clave: (Cuenta, Campaña, Término). Sirve para dejar constancia de por qué un
+# término con score bajo es en realidad bueno: Google opera cada vez más en
+# concordancia amplia, así que la palabra no coincide con la KW pero la
+# intención sí es relevante. Marcarlo una vez evita volver a revisarlo en la
+# siguiente auditoría.
+
+VEREDICTO_DEFAULT = "Sin revisar"
+VEREDICTOS_TERMINO = [
+    VEREDICTO_DEFAULT,
+    "Relevante",       # falso negativo: score bajo pero intención buena
+    "Irrelevante",     # confirmado malo: candidato a negativa
+    "Dudoso",          # hay que mirarlo con el cliente / más datos
+]
+
+
+def clave_termino(campana, termino) -> str:
+    return f"{str(campana or '').strip()}||{str(termino or '').strip()}"
+
+
+def load_search_term_notes(cuenta: str) -> Dict[str, dict]:
+    """Notas de UNA cuenta, indexadas por 'Campaña||Término'.
+
+    Se consulta por cuenta y no todo el histórico porque el detalle siempre se
+    mira de una cuenta a la vez y Streamlit reejecuta el script entero en cada
+    interacción: traer la tabla completa en cada rerun dispararía el egress.
+    """
+    engine = db.get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT campana, termino, veredicto, nota, ultima_actualizacion
+            FROM search_term_notes WHERE cuenta = :cuenta
+        """), {"cuenta": cuenta}).fetchall()
+    return {
+        clave_termino(r.campana, r.termino): {
+            "campana": r.campana,
+            "termino": r.termino,
+            "veredicto": r.veredicto or VEREDICTO_DEFAULT,
+            "nota": r.nota or "",
+            "ultima_actualizacion": _iso(r.ultima_actualizacion),
+        }
+        for r in rows
+    }
+
+
+def set_search_term_note(
+    cuenta: str, campana: str, termino: str, veredicto: str, nota: str,
+) -> None:
+    veredicto = (veredicto or "").strip()
+    if veredicto == VEREDICTO_DEFAULT:
+        veredicto = ""
+    nota = (nota or "").strip()
+
+    engine = db.get_engine()
+    with engine.begin() as conn:
+        if not veredicto and not nota:
+            conn.execute(text("""
+                DELETE FROM search_term_notes
+                WHERE cuenta = :cuenta AND campana = :campana AND termino = :termino
+            """), {"cuenta": cuenta, "campana": campana, "termino": termino})
+        else:
+            conn.execute(text("""
+                INSERT INTO search_term_notes
+                    (cuenta, campana, termino, veredicto, nota, ultima_actualizacion)
+                VALUES
+                    (:cuenta, :campana, :termino, :veredicto, :nota, :ultima_actualizacion)
+                ON CONFLICT (cuenta, campana, termino) DO UPDATE SET
+                    veredicto = EXCLUDED.veredicto,
+                    nota = EXCLUDED.nota,
+                    ultima_actualizacion = EXCLUDED.ultima_actualizacion
+            """), {
+                "cuenta": cuenta,
+                "campana": campana,
+                "termino": termino,
+                "veredicto": veredicto,
+                "nota": nota,
+                "ultima_actualizacion": datetime.now(),
+            })
+
+
+def count_search_term_notes(cuenta: Optional[str] = None) -> int:
+    """Número de términos anotados (de una cuenta, o de todas si es None)."""
+    engine = db.get_engine()
+    with engine.begin() as conn:
+        if cuenta is None:
+            row = conn.execute(text(
+                "SELECT COUNT(*) AS n FROM search_term_notes"
+            )).fetchone()
+        else:
+            row = conn.execute(text(
+                "SELECT COUNT(*) AS n FROM search_term_notes WHERE cuenta = :cuenta"
+            ), {"cuenta": cuenta}).fetchone()
+    return int(row.n) if row else 0
 
 
 # ─── Sugerencias de optimización ─────────────────────────────────────────────
