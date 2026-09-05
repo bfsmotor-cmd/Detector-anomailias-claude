@@ -10,7 +10,13 @@ env/
 *.egg-info/
 
 # Streamlit
-.streamlit/secrets.toml
+**/.streamlit/secrets.toml*
+!**/.streamlit/secrets.toml.example
+
+# Credenciales locales y variantes (.env.local, .env.production, etc.)
+.env
+.env.*
+!.env.example
 
 # IDE
 .vscode/
