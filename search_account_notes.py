@@ -43,6 +43,13 @@ def render_ranking(tabla, column_config):
     tabla["Notas de revisión"] = [
         pending.get(cuenta, notes.get(cuenta, "")) for cuenta in tabla["Cuenta"]
     ]
+    # La nota se consulta mientras se interpreta el score. Ubicarla junto a
+    # esa métrica evita recorrer toda la tabla hasta la última columna.
+    score_column = "score_promedio"
+    if score_column in tabla.columns:
+        posicion_nota = tabla.columns.get_loc(score_column) + 1
+        nota = tabla.pop("Notas de revisión")
+        tabla.insert(posicion_nota, "Notas de revisión", nota)
     # Cada evento consume el delta y estrena editor: evita volver a guardar
     # ediciones acumuladas y sobrescribir cambios posteriores de otra persona.
     revision = st.session_state.get(f"{prefix}_revision", 0)
