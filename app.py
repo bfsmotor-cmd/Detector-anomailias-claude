@@ -28,6 +28,8 @@ st.set_page_config(
 _API_REQUERIDA = [
     (analyzer, ("PAUSED_STATUSES", "COLUMN_SYNONYMS", "normalize_columns", "sniff_decimal_sep")),
     (search_terms_analyzer, ("load_search_terms_csv", "compute_coverage_score")),
+    (comments_store, ("load_search_term_notes", "set_search_term_note", "clave_termino")),
+    (db, ("SCHEMA_VERSION",)),
 ]
 _faltantes = [
     f"`{mod.__name__}.{attr}`"
@@ -49,7 +51,7 @@ password = st.text_input("Ingresa la contraseña", type="password")
 if password != APP_PASSWORD:
     st.stop()
 
-db.init_db()
+db.init_db(db.SCHEMA_VERSION)
 
 
 # ─── Datos compartidos con el equipo ──────────────────────────────────────────
@@ -569,15 +571,150 @@ def render_search_terms_section(
     detalle = detalle[~detalle["_sin_keyword"]]
     detalle = detalle.sort_values("_score_similitud", ascending=True, na_position="last")
 
+    # ── Veredicto + nota por término ────────────────────────────────────────
+    # El score solo mide solape de palabras: con Google empujando concordancia
+    # amplia, muchos términos relevantes puntúan bajo. Anotarlos una vez evita
+    # volver a perder tiempo con los mismos falsos negativos mañana.
+    DEFAULT_VEREDICTO = comments_store.VEREDICTO_DEFAULT
+
+    def _cargar_notas_terminos(cuenta: str):
+        """Notas de la cuenta, o None si la base compartida no responde."""
+        try:
+            data = comments_store.load_search_term_notes(cuenta)
+            st.session_state["_st_notas_cache"] = (cuenta, data)
+            st.session_state["_st_notas_error"] = None
+            return data
+        except Exception as e:
+            st.session_state["_st_notas_error"] = str(e)
+            cacheado = st.session_state.get("_st_notas_cache")
+            if cacheado and cacheado[0] == cuenta:
+                return cacheado[1]
+            return None
+
+    notas = _cargar_notas_terminos(sel_cuenta)
+    notas_editables = notas is not None
+    if notas is None:
+        notas = {}
+        st.warning(
+            "⚠️ No se pudieron cargar las notas por término desde la base de datos "
+            f"compartida ({st.session_state.get('_st_notas_error')}). La tabla se "
+            "muestra en solo lectura; reintenta en unos segundos.",
+            icon="⚠️",
+        )
+    elif st.session_state.get("_st_notas_error"):
+        st.warning(
+            "⚠️ No se pudo refrescar las notas desde la base de datos compartida "
+            "(mostrando el último snapshot conocido de esta sesión).",
+            icon="⚠️",
+        )
+
+    claves = [
+        comments_store.clave_termino(campana, termino)
+        for campana, termino in zip(
+            detalle["Campaña"] if "Campaña" in detalle.columns else [""] * len(detalle),
+            detalle["Término de búsqueda"],
+        )
+    ]
+    detalle["Veredicto"] = [
+        notas.get(k, {}).get("veredicto", DEFAULT_VEREDICTO) for k in claves
+    ]
+    detalle["Nota"] = [notas.get(k, {}).get("nota", "") for k in claves]
+
+    n_marcados = int((detalle["Veredicto"] != DEFAULT_VEREDICTO).sum())
+    n_relevantes = int((detalle["Veredicto"] == "Relevante").sum())
+
+    f1, f2 = st.columns([2, 3])
+    with f1:
+        ocultar_revisados = st.checkbox(
+            f"Ocultar términos ya revisados ({n_marcados})",
+            value=True,
+            key="st_ocultar_revisados",
+            disabled=n_marcados == 0,
+            help="Deja fuera los términos que ya tienen veredicto guardado, "
+                 "para no volver a revisar los mismos falsos negativos.",
+        )
+    with f2:
+        if n_marcados:
+            st.caption(
+                f"✍️ {n_marcados} término(s) anotado(s) en esta cuenta "
+                f"({n_relevantes} marcado(s) como **Relevante**)."
+            )
+
+    vista = detalle[detalle["Veredicto"] == DEFAULT_VEREDICTO] if ocultar_revisados else detalle
+
     cols_detalle = ["Término de búsqueda", "Palabra clave", "Campaña",
                     "Tipo de concordancia", "Clics", "Coste", "Conversiones",
-                    "_score_similitud"]
-    cols_existentes = [c for c in cols_detalle if c in detalle.columns]
-    st.dataframe(
-        detalle[cols_existentes],
+                    "_score_similitud", "Veredicto", "Nota"]
+    cols_existentes = [c for c in cols_detalle if c in vista.columns]
+    vista = vista[cols_existentes].reset_index(drop=True)
+
+    if "_st_notas_pendientes" not in st.session_state:
+        st.session_state["_st_notas_pendientes"] = {}
+
+    # La clave del editor incluye cuenta y filtro: `edited_rows` guarda posiciones
+    # de fila, así que reutilizar el mismo widget con otro conjunto de filas
+    # podría aplicar una edición a un término distinto.
+    editor_key = f"st_detalle_editor::{sel_cuenta}::{int(bool(ocultar_revisados))}"
+
+    def _guardar_nota(campana: str, termino: str, veredicto: str, nota: str):
+        """Persiste una fila al instante. Devuelve (ok, error)."""
+        pendientes = st.session_state["_st_notas_pendientes"]
+        try:
+            comments_store.set_search_term_note(
+                sel_cuenta, campana, termino, veredicto, nota,
+            )
+            pendientes.pop((sel_cuenta, campana, termino), None)
+            return True, None
+        except Exception as e:
+            pendientes[(sel_cuenta, campana, termino)] = (veredicto, nota, str(e))
+            return False, str(e)
+
+    def _autosave_notas_terminos():
+        """on_change del data_editor: guarda cada celda editada sin esperar a
+        que se termine de editar toda la tabla."""
+        estado_editor = st.session_state.get(editor_key) or {}
+        filas_editadas = estado_editor.get("edited_rows") or {}
+        if not filas_editadas:
+            return
+
+        guardadas = 0
+        for pos, cambios in filas_editadas.items():
+            try:
+                fila = vista.iloc[int(pos)]
+            except (IndexError, ValueError, KeyError):
+                continue
+            campana = str(fila.get("Campaña", "") or "")
+            termino = str(fila.get("Término de búsqueda", "") or "")
+            veredicto = cambios.get("Veredicto", fila.get("Veredicto")) or DEFAULT_VEREDICTO
+            nota = (cambios.get("Nota", fila.get("Nota")) or "").strip()
+            ok, _err = _guardar_nota(campana, termino, veredicto, nota)
+            if ok:
+                guardadas += 1
+        st.session_state["_st_notas_guardadas"] = guardadas
+
+    # Con la conexión caída la tabla se muestra pero no se deja editar: guardar
+    # a ciegas daría una falsa sensación de que la nota quedó registrada.
+    if notas_editables:
+        cols_bloqueadas = [c for c in cols_existentes if c not in ("Veredicto", "Nota")]
+    else:
+        cols_bloqueadas = True
+
+    if vista.empty:
+        st.success(
+            "✅ No queda ningún término sin revisar en esta cuenta. "
+            "Desmarca *Ocultar términos ya revisados* para volver sobre los anotados."
+        )
+
+    st.data_editor(
+        vista,
         use_container_width=True,
         hide_index=True,
+        height=max(150, min(600, 60 + len(vista) * 38)),
+        key=editor_key,
+        on_change=_autosave_notas_terminos if notas_editables else None,
+        disabled=cols_bloqueadas,
         column_config={
+            "Término de búsqueda": st.column_config.TextColumn(width="large", pinned=True),
             "_score_similitud": st.column_config.ProgressColumn(
                 "Score cobertura",
                 min_value=0, max_value=100,
@@ -586,12 +723,76 @@ def render_search_terms_section(
             "Clics": st.column_config.NumberColumn("Clics", format="%.0f"),
             "Coste": st.column_config.NumberColumn("Coste", format="%.2f"),
             "Conversiones": st.column_config.NumberColumn("Conversiones", format="%.2f"),
+            "Veredicto": st.column_config.SelectboxColumn(
+                "Veredicto",
+                options=comments_store.VEREDICTOS_TERMINO,
+                default=DEFAULT_VEREDICTO,
+                required=True,
+                width="medium",
+                help="**Relevante**: el score es bajo pero la intención sí encaja "
+                     "(concordancia amplia). **Irrelevante**: candidato a negativa. "
+                     "**Dudoso**: hay que mirarlo con más datos.",
+            ),
+            "Nota": st.column_config.TextColumn(
+                "Nota",
+                width="large",
+                max_chars=500,
+                help="Por qué este término es (o no es) bueno. Se guarda solo al "
+                     "salir del campo y la ve todo el equipo.",
+            ),
         },
     )
+
+    if notas_editables:
+        st.caption(
+            "✏️ Marca el **Veredicto** y escribe tu **Nota**: cada cambio se guarda "
+            "automáticamente en la base compartida al confirmarlo (clic fuera del "
+            "campo o Enter). No hace falta ningún botón de guardado."
+        )
+
+    pendientes_notas = st.session_state["_st_notas_pendientes"]
+    if pendientes_notas:
+        detalle_err = "; ".join(
+            f"{termino}: {err}"
+            for (_c, _camp, termino), (_v, _n, err) in list(pendientes_notas.items())[:3]
+        )
+        st.error(
+            f"❌ {len(pendientes_notas)} nota(s) **NO guardada(s)** en la base "
+            f"compartida (se perderían al cerrar la sesión): {detalle_err}. "
+            "Revisa la conexión y presiona 'Reintentar guardado'.",
+            icon="🚨",
+        )
+        if st.button("🔁 Reintentar guardado", type="primary", key="st_notas_retry"):
+            for (_c, campana, termino), (ver, nota_txt, _err) in list(pendientes_notas.items()):
+                _guardar_nota(campana, termino, ver, nota_txt)
+            st.rerun()
+    else:
+        _guardadas = st.session_state.pop("_st_notas_guardadas", 0)
+        if _guardadas:
+            st.toast(f"💾 {_guardadas} nota(s) guardada(s) automáticamente.", icon="✅")
+
+    if ocultar_revisados and n_marcados:
+        st.caption(
+            f"🙈 {n_marcados} término(s) ya revisado(s) oculto(s). "
+            "Desmarca la casilla de arriba para verlos y editarlos."
+        )
 
     sin_kw_cuenta = int(df_terms[(df_terms["Cuenta"] == sel_cuenta) & df_terms["_sin_keyword"]].shape[0])
     if sin_kw_cuenta > 0:
         st.caption(f"ℹ️ {sin_kw_cuenta} fila(s) sin palabra clave excluidas del detalle.")
+
+    export = detalle[[c for c in cols_detalle if c in detalle.columns]].rename(
+        columns={"_score_similitud": "Score cobertura"}
+    )
+    st.download_button(
+        "📥 Descargar detalle con notas (CSV)",
+        export.to_csv(index=False).encode("utf-8"),
+        f"terminos_{sel_cuenta}.csv".replace(" ", "_"),
+        "text/csv",
+        key="st_detalle_dl",
+        help="Incluye todos los términos de la cuenta con su veredicto y nota, "
+             "estén ocultos o no en la tabla.",
+    )
 
     # Tras un clic en el ranking, bajar la vista hasta este bloque. El script
     # corre dentro de un iframe, así que se opera sobre `window.parent`.
