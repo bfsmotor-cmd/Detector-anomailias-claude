@@ -9,6 +9,7 @@ import client_report
 import comments_store
 import db
 import search_terms_analyzer
+import search_account_notes
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -28,7 +29,8 @@ st.set_page_config(
 _API_REQUERIDA = [
     (analyzer, ("PAUSED_STATUSES", "COLUMN_SYNONYMS", "normalize_columns", "sniff_decimal_sep")),
     (search_terms_analyzer, ("load_search_terms_csv", "compute_coverage_score")),
-    (comments_store, ("load_search_term_notes", "set_search_term_note", "clave_termino")),
+    (comments_store, ("load_search_term_notes", "set_search_term_note", "clave_termino",
+                      "load_search_account_notes", "set_search_account_note")),
     (db, ("SCHEMA_VERSION",)),
 ]
 _faltantes = [
@@ -464,13 +466,8 @@ def render_search_terms_section(
 
     tabla_cuentas["alerta"] = tabla_cuentas.apply(_estado, axis=1)
     tabla_cuentas = tabla_cuentas.drop(columns=["_evaluada"]).reset_index(drop=True)
-    ranking_event = st.dataframe(
+    cuenta_tabla = search_account_notes.render_ranking(
         tabla_cuentas,
-        use_container_width=True,
-        hide_index=True,
-        key="ranking_cuentas_tbl",
-        on_select="rerun",
-        selection_mode="single-row",
         column_config={
             "Cuenta": st.column_config.TextColumn("Cuenta", width="large"),
             "score_promedio": st.column_config.ProgressColumn(
@@ -488,15 +485,6 @@ def render_search_terms_section(
             "alerta": st.column_config.TextColumn("Alerta", width="small"),
         },
     )
-
-    # Cuenta marcada en la tabla del ranking (si la hay).
-    cuenta_tabla = None
-    try:
-        filas_sel = list(ranking_event.selection["rows"])
-    except (AttributeError, KeyError, TypeError):
-        filas_sel = []
-    if filas_sel and filas_sel[0] < len(tabla_cuentas):
-        cuenta_tabla = tabla_cuentas.iloc[filas_sel[0]]["Cuenta"]
 
     # ── Gráfico Plotly ──────────────────────────────────────────────────────
     if not agg["score_promedio"].isna().all():

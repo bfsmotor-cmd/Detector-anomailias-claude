@@ -16,6 +16,30 @@ def _iso(dt) -> str:
     return dt.isoformat(timespec="seconds") if dt else ""
 
 
+def load_search_account_notes() -> Dict[str, str]:
+    """Notas de revisión de términos por cuenta, compartidas entre cargas de CSV."""
+    with db.get_engine().begin() as conn:
+        rows = conn.execute(text("SELECT cuenta, nota FROM search_account_notes")).fetchall()
+    return {r.cuenta: r.nota or "" for r in rows}
+
+
+def set_search_account_note(cuenta: str, nota: str) -> None:
+    """Guarda solo la cuenta editada; vaciar la celda elimina su nota."""
+    nota = (nota or "").strip()
+    with db.get_engine().begin() as conn:
+        if not nota:
+            conn.execute(text("DELETE FROM search_account_notes WHERE cuenta = :cuenta"),
+                         {"cuenta": cuenta})
+        else:
+            conn.execute(text("""
+                INSERT INTO search_account_notes (cuenta, nota, ultima_actualizacion)
+                VALUES (:cuenta, :nota, :ultima_actualizacion)
+                ON CONFLICT (cuenta) DO UPDATE SET
+                    nota = EXCLUDED.nota,
+                    ultima_actualizacion = EXCLUDED.ultima_actualizacion
+            """), {"cuenta": cuenta, "nota": nota, "ultima_actualizacion": datetime.now()})
+
+
 def load_all() -> Dict[str, dict]:
     engine = db.get_engine()
     with engine.begin() as conn:
