@@ -9,6 +9,7 @@ Dashboard en Streamlit para analizar exports CSV de campañas de Google Ads (MCC
 - 🟡 **Sin conversiones** – Cuentas sin conversiones en los últimos N días
 - 🔵 **Presupuesto no consumido** – Campañas que no alcanzaron el % objetivo de presupuesto en los últimos N días
 - 📊 **Ranking** – Top de campañas por conversiones, coste, clics, CPA o CPC
+- ✏️ **Notas de revisión de términos por cuenta** – Columna editable en el ranking de términos de búsqueda. Guarda en la base compartida al presionar Enter o salir de la celda; las notas se conservan entre cargas de CSV. Si falla el guardado, muestra el cambio pendiente y permite reintentarlo.
 
 ## Uso
 

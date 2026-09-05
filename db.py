@@ -20,7 +20,7 @@ def get_engine():
 # `cache_resource`, que sobrevive a los reruns y también a un push en Streamlit
 # Cloud mientras el proceso siga vivo: sin este argumento el CREATE TABLE nuevo
 # no llegaría a ejecutarse y la app fallaría contra un esquema viejo.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @st.cache_resource
@@ -43,6 +43,13 @@ def init_db(schema_version: int = SCHEMA_VERSION) -> bool:
                 comentario TEXT NOT NULL DEFAULT '',
                 ultima_actualizacion TIMESTAMP NOT NULL,
                 PRIMARY KEY (cuenta, campana)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS search_account_notes (
+                cuenta TEXT PRIMARY KEY,
+                nota TEXT NOT NULL DEFAULT '',
+                ultima_actualizacion TIMESTAMP NOT NULL
             )
         """))
         conn.execute(text("""
